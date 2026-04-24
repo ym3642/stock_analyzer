@@ -1,99 +1,117 @@
-# 📈 Stock Analyzer Pro — Python Edition
+# 📈 SmartStock — Premium Trading Terminal
 
-Full-featured stock analysis dashboard built with Streamlit, yfinance, and Claude AI.
+A professional-grade stock analysis web app built with Python and Streamlit. Analyze any stock with real-time data, AI-powered investment thesis, famous investor simulations, backtesting, and global market coverage.
+
+🌐 **Live at: [smartstock.trading](https://smartstock.trading)**
 
 ---
 
 ## Features
 
-| Tab | What you get |
-|---|---|
-| **Overview** | Candlestick chart, 24 fundamental metrics, business description |
-| **Valuation** | P/E, P/S, EV/EBITDA, P/B, analyst consensus, interactive DCF calculator |
-| **Risk & Volatility** | Beta, Sharpe, Sortino, Calmar, VaR, CVaR, drawdown chart, rolling Sharpe |
-| **Industry & Peers** | Customizable peer comparison table, normalized 1yr performance chart |
-| **Technical Analysis** | RSI, MACD, Stochastic, Bollinger Bands, OBV, ADX, ATR, support/resistance |
-| **AI Analysis** | Claude-powered bull/bear thesis, factor scores, catalysts, ESG assessment |
+### 📊 Company Analysis
+- **Overview** — Live price chart (Webull-style candlesticks), key metrics, 52-week range, volume, dividends
+- **Valuation** — P/E, Forward P/E, P/S, PEG, EV/EBITDA, interactive DCF fair value calculator, analyst price targets, financial statements
+- **Risk** — Sharpe ratio, Sortino, Calmar, Max Drawdown, VaR/CVaR, Beta vs S&P 500, rolling risk metrics
+- **Industry** — Sector comparison, peer benchmarking, industry averages
+- **Technical** — RSI, MACD, Bollinger Bands, moving averages, volume analysis
+- **Comparison** — Side-by-side comparison of any two stocks across 30+ metrics
+- **Company News** — Latest news with sentiment tagging
+
+### 🤖 AI & Investor Intelligence
+- **AI Thesis** — Rule-based AI investment thesis with bull/bear case, factor scores, ESG assessment, catalysts and risks
+- **Investor View** — Simulate portfolios of famous investors (Buffett, Dalio, Lynch, Ackman, and more) with:
+  - Live factor scoring (Quality, Value, Growth, Momentum, Stability)
+  - Market regime detection (VIX, SPY/QQQ/IWM breadth)
+  - News shock overlay
+  - Full backtest engine with SPY benchmark comparison
+  - Monthly returns heatmap, rolling Sharpe, return distribution
+  - Alpha, Beta, R², Treynor, Omega Ratio, Ulcer Index, and more
+
+### 🌐 Market & Global
+- **Market News** — Global market headlines with sentiment and impact analysis
+- **Market Rankings** — Top movers screener with AI scoring across global markets
+- **Global Indexes** — World market overview across all continents
+- **Commodities** — Oil, gold, silver, natural gas, and more
+
+### 🔧 Tools
+- **Bond Calculator** — Yield to maturity, duration, convexity, cashflow table
+- **Option Calculator** — Black-Scholes pricing with full Greeks (Delta, Gamma, Theta, Vega, Rho)
 
 ---
 
-## Setup (takes ~2 minutes)
+## Tech Stack
 
-### 1. Prerequisites
-- Python 3.9 or higher
-- Check: `python --version`
+| Layer | Technology |
+|---|---|
+| Frontend | Streamlit |
+| Charts | Plotly |
+| Data | Yahoo Finance (yfinance) |
+| Technical Analysis | pandas-ta |
+| Hosting | Render |
+| Domain | Cloudflare |
+| Language | Python 3.11+ |
 
-### 2. Create a virtual environment (recommended)
+---
+
+## Run Locally
+
+**1. Clone the repo**
 ```bash
-python -m venv venv
-
-# macOS / Linux:
-source venv/bin/activate
-
-# Windows:
-venv\Scripts\activate
+git clone https://github.com/ym3642/stock_analyzer.git
+cd stock_analyzer
 ```
 
-### 3. Install dependencies
+**2. Create a virtual environment**
+```bash
+python -m venv venv
+venv\Scripts\activate        # Windows
+source venv/bin/activate     # Mac/Linux
+```
+
+**3. Install dependencies**
 ```bash
 pip install -r requirements.txt
 ```
 
-### 4. Run the app
+**4. Run the app**
 ```bash
 streamlit run app.py
 ```
 
-The browser opens automatically at `http://localhost:8501`
+Open your browser at `http://localhost:8501`
 
 ---
 
-## AI Analysis (Optional)
+## Deployment
 
-The AI tab uses Claude (Anthropic). To enable it:
+The app is deployed on **Render** with automatic deploys from this GitHub repo.
 
-1. Get a free API key at https://console.anthropic.com
-2. Paste the key into the **Anthropic API Key** field in the sidebar
-3. Click **Generate AI Thesis**
+Every `git push` to `main` triggers a redeploy automatically:
 
-You are NOT required to use AI — all other tabs work without an API key.
-
----
-
-## Usage
-
-1. Type any stock ticker in the sidebar (e.g. `AAPL`, `NVDA`, `BRK-B`)
-2. Or click one of the quick-pick buttons
-3. Select a data period and chart window
-4. Toggle Moving Averages / Bollinger Bands overlays
-5. Navigate tabs for different analysis views
-6. In Industry & Peers, edit the peer tickers text box to compare any stocks
+```
+Local code  →  git push  →  GitHub  →  Render auto-deploy  →  smartstock.trading
+```
 
 ---
 
-## Data Sources
+## Project Structure
 
-- **Price & Fundamentals**: Yahoo Finance via `yfinance` (free, no API key needed)
-- **Technical Indicators**: Calculated in real-time via `ta` library
-- **AI Thesis**: Anthropic Claude API (optional, requires key)
-- **Benchmark**: S&P 500 via SPY ETF
-
----
-
-## Troubleshooting
-
-**"Module not found"** — Make sure your virtual environment is activated and you ran `pip install -r requirements.txt`
-
-**"Ticker not found"** — Double-check the symbol. International stocks use suffixes: `TSM` (Taiwan), `005930.KS` (Samsung), `BARC.L` (Barclays)
-
-**Slow loading** — Data is cached for 5 minutes. First load per ticker takes ~3-5 seconds.
-
-**AI tab not working** — Check that your API key starts with `sk-ant-` and has credits available.
+```
+stock_analyzer/
+├── app.py              # Main application (all-in-one)
+├── Procfile            # Render/Railway start command
+├── requirements.txt    # Python dependencies
+└── README.md           # This file
+```
 
 ---
 
 ## Disclaimer
 
-This tool is for **educational and informational purposes only**.  
-It does not constitute financial advice.  
-Always do your own research before making investment decisions.
+SmartStock is for **educational and informational purposes only**. Nothing on this platform constitutes financial advice. Always conduct your own due diligence and consult a qualified financial advisor before making investment decisions. Data is sourced from Yahoo Finance and may be delayed or inaccurate.
+
+---
+
+## License
+
+MIT 
