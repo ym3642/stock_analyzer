@@ -591,95 +591,232 @@ def legend_html(items):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  DATA LAYER
+#  DATA LAYER — FMP (primary) + yfinance (fallback for charts)
 # ══════════════════════════════════════════════════════════════════
+import os as _os
+_FMP_KEY = _os.environ.get("FMP_API_KEY", "DxeKYRzNAkRg9sVrsVEZUNUSVqKzCHa0")
+_FMP_BASE = "https://financialmodelingprep.com/api/v3"
+
+
+def _fmp_get(endpoint, params=None):
+    """Make a single FMP API call and return parsed JSON or None."""
+    try:
+        p = params or {}
+        p["apikey"] = _FMP_KEY
+        r = requests.get(f"{_FMP_BASE}/{endpoint}", params=p, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, list) and len(data) > 0:
+                return data
+            if isinstance(data, dict) and data:
+                return data
+        return None
+    except Exception:
+        return None
+
+
+def _fmp_build_info(ticker):
+    """Build a yfinance-compatible info dict from FMP endpoints."""
+    info = {}
+    try:
+        # Profile — company info + fundamentals
+        profile = _fmp_get(f"profile/{ticker}")
+        if profile and isinstance(profile, list):
+            p = profile[0]
+            info.update({
+                "shortName":             p.get("companyName", ticker),
+                "longName":              p.get("companyName", ticker),
+                "symbol":                p.get("symbol", ticker),
+                "sector":                p.get("sector", ""),
+                "industry":              p.get("industry", ""),
+                "country":               p.get("country", ""),
+                "website":               p.get("website", ""),
+                "longBusinessSummary":   p.get("description", ""),
+                "fullTimeEmployees":     p.get("fullTimeEmployees", 0),
+                "exchange":              p.get("exchangeShortName", ""),
+                "currency":              p.get("currency", "USD"),
+                "regularMarketPrice":    p.get("price", 0),
+                "marketCap":             p.get("mktCap", 0),
+                "beta":                  p.get("beta", 1.0),
+                "dividendYield":         (p.get("lastDiv", 0) / p.get("price", 1)) if p.get("price") else 0,
+                "fiftyTwoWeekHigh":      p.get("range", "0-0").split("-")[-1] if p.get("range") else 0,
+                "fiftyTwoWeekLow":       p.get("range", "0-0").split("-")[0] if p.get("range") else 0,
+                "logo_url":              p.get("image", ""),
+            })
+
+        # Key metrics — valuation ratios
+        metrics = _fmp_get(f"key-metrics-ttm/{ticker}")
+        if metrics and isinstance(metrics, list):
+            m = metrics[0]
+            info.update({
+                "trailingPE":                    m.get("peRatioTTM", 0),
+                "forwardPE":                     m.get("priceToEarningsRatioTTM", 0),
+                "priceToSalesTrailing12Months":  m.get("priceToSalesRatioTTM", 0),
+                "priceToBook":                   m.get("pbRatioTTM", 0),
+                "pegRatio":                      m.get("pegRatioTTM", 0),
+                "enterpriseToEbitda":            m.get("evToEBITDATTM", 0),
+                "enterpriseToRevenue":           m.get("evToSalesRatioTTM", 0),
+                "returnOnEquity":                m.get("roeTTM", 0),
+                "returnOnAssets":                m.get("roaTTM", 0),
+                "debtToEquity":                  m.get("debtToEquityTTM", 0) * 100,
+                "currentRatio":                  m.get("currentRatioTTM", 0),
+                "quickRatio":                    m.get("quickRatioTTM", 0),
+                "dividendYield":                 m.get("dividendYieldTTM", 0),
+                "payoutRatio":                   m.get("payoutRatioTTM", 0),
+                "sharesOutstanding":             m.get("marketCapTTM", 0) / max(info.get("regularMarketPrice", 1), 1),
+            })
+
+        # Financial ratios — margins and growth
+        ratios = _fmp_get(f"ratios-ttm/{ticker}")
+        if ratios and isinstance(ratios, list):
+            r = ratios[0]
+            info.update({
+                "profitMargins":   r.get("netProfitMarginTTM", 0),
+                "grossMargins":    r.get("grossProfitMarginTTM", 0),
+                "operatingMargins":r.get("operatingProfitMarginTTM", 0),
+                "ebitdaMargins":   r.get("ebitdaPerShareTTM", 0),
+            })
+
+        # Income statement — revenue, earnings
+        income = _fmp_get(f"income-statement/{ticker}", {"limit": 2})
+        if income and isinstance(income, list) and len(income) >= 1:
+            latest = income[0]
+            prev   = income[1] if len(income) > 1 else {}
+            rev_now  = latest.get("revenue", 0)
+            rev_prev = prev.get("revenue", 1) or 1
+            eps_now  = latest.get("eps", 0)
+            eps_prev = prev.get("eps", 1) or 1
+            info.update({
+                "totalRevenue":    rev_now,
+                "netIncomeToCommon": latest.get("netIncome", 0),
+                "ebitda":          latest.get("ebitda", 0),
+                "revenueGrowth":   (rev_now - rev_prev) / abs(rev_prev) if rev_prev else 0,
+                "earningsGrowth":  (eps_now - eps_prev) / abs(eps_prev) if eps_prev else 0,
+                "trailingEps":     eps_now,
+                "forwardEps":      latest.get("epsdiluted", eps_now),
+            })
+
+        # Balance sheet — debt, cash
+        balance = _fmp_get(f"balance-sheet-statement/{ticker}", {"limit": 1})
+        if balance and isinstance(balance, list):
+            b = balance[0]
+            info.update({
+                "totalDebt":       b.get("totalDebt", 0),
+                "totalCash":       b.get("cashAndCashEquivalents", 0),
+                "bookValue":       b.get("totalStockholdersEquity", 0),
+            })
+
+        # Cash flow — free cash flow
+        cashflow = _fmp_get(f"cash-flow-statement/{ticker}", {"limit": 1})
+        if cashflow and isinstance(cashflow, list):
+            c = cashflow[0]
+            info.update({
+                "freeCashflow":    c.get("freeCashFlow", 0),
+                "operatingCashflow": c.get("operatingCashFlow", 0),
+            })
+
+        # Analyst estimates
+        estimates = _fmp_get(f"analyst-stock-recommendations/{ticker}", {"limit": 5})
+        if estimates and isinstance(estimates, list):
+            buys   = sum(e.get("analystRatingsbuy", 0) for e in estimates)
+            holds  = sum(e.get("analystRatingsHold", 0) for e in estimates)
+            sells  = sum(e.get("analystRatingsSell", 0) for e in estimates)
+            total  = buys + holds + sells or 1
+            info.update({
+                "numberOfAnalystOpinions": total,
+                "recommendationMean": 1.5 if buys/total > 0.6 else 3.0 if sells/total > 0.3 else 2.5,
+                "recommendationKey": "buy" if buys/total > 0.6 else "sell" if sells/total > 0.3 else "hold",
+                "targetMeanPrice": 0,
+            })
+
+    except Exception as e:
+        pass
+
+    return info if info else None
+
+
+def _fmp_build_hist(ticker, period="2y"):
+    """Fetch OHLCV history from FMP and return as yfinance-compatible DataFrame."""
+    try:
+        # Map period to FMP from/to dates
+        from datetime import datetime, timedelta
+        period_days = {
+            "1mo": 30, "3mo": 90, "6mo": 180,
+            "1y": 365, "2y": 730, "5y": 1825,
+            "10y": 3650, "max": 7300,
+        }
+        days = period_days.get(str(period).lower(), 730)
+        date_from = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+        date_to   = datetime.today().strftime("%Y-%m-%d")
+
+        data = _fmp_get(f"historical-price-full/{ticker}",
+                        {"from": date_from, "to": date_to})
+
+        if not data:
+            return pd.DataFrame()
+
+        # FMP returns {"symbol": ..., "historical": [...]}
+        if isinstance(data, dict):
+            historical = data.get("historical", [])
+        elif isinstance(data, list):
+            historical = data
+        else:
+            return pd.DataFrame()
+
+        if not historical:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(historical)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date").sort_index()
+        df = df.rename(columns={
+            "open":   "Open",
+            "high":   "High",
+            "low":    "Low",
+            "close":  "Close",
+            "volume": "Volume",
+        })
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
+    except Exception:
+        return pd.DataFrame()
+
+
 def _fetch_stock_uncached(ticker, period="2y"):
-    """Inner fetch with retry across multiple Yahoo endpoints.
-    Tries direct connection first, then falls back to alternate query endpoints.
-    """
-    import time as _t
+    """Fetch stock data using FMP (primary) with yfinance as fallback."""
+    # Try FMP first
+    try:
+        info = _fmp_build_info(ticker)
+        hist = _fmp_build_hist(ticker, period)
+        if info and not hist.empty:
+            return {"info": info, "hist": hist}, None
+    except Exception:
+        pass
 
-    # Step 1: validate ticker with fast_info (lightweight, 1 request)
-    symbol_ok = False
-    fi = None
-    for proxy in _YF_PROXIES:
-        try:
-            stk_test = _yf_ticker(ticker, proxy=proxy)
-            fi = stk_test.fast_info
-            last = getattr(fi, "last_price", None)
-            if last and float(last) > 0:
-                symbol_ok = True
-                break
-        except Exception:
-            _t.sleep(0.5)
-            continue
-
-    if not symbol_ok:
-        return None, f"Ticker '{ticker}' not found. Check the symbol and try again."
-
-    # Step 2: get full info — try each proxy until one works
-    info = None
-    for proxy in _YF_PROXIES:
-        try:
-            stk = _yf_ticker(ticker, proxy=proxy)
-            _t.sleep(0.3)
-            info = stk.info
-            if info and len(info) > 10:
-                break
-            info = None
-        except Exception as e:
-            msg = str(e).lower()
-            if "too many requests" in msg or "429" in msg:
-                _t.sleep(1.5)
-            continue
-
-    # Fallback: build minimal info from fast_info if .info failed
-    if not info or len(info) < 10:
-        try:
-            info = {
-                "shortName":           ticker.upper(),
-                "longName":            ticker.upper(),
-                "regularMarketPrice":  getattr(fi, "last_price", 0),
-                "marketCap":           getattr(fi, "market_cap", 0),
-                "currency":            getattr(fi, "currency", "USD"),
-                "exchange":            getattr(fi, "exchange", ""),
-                "fiftyTwoWeekHigh":    getattr(fi, "year_high", 0),
-                "fiftyTwoWeekLow":     getattr(fi, "year_low", 0),
-                "sharesOutstanding":   getattr(fi, "shares", 0),
-            }
-        except Exception:
-            pass
-
-    # Step 3: get price history — try each proxy until one works
-    hist = pd.DataFrame()
-    for proxy in _YF_PROXIES:
-        try:
-            stk = _yf_ticker(ticker, proxy=proxy)
-            _t.sleep(0.3)
-            hist = stk.history(period=period, auto_adjust=True)
-            if not hist.empty:
-                break
-        except Exception as e:
-            msg = str(e).lower()
-            if "too many requests" in msg or "429" in msg:
-                _t.sleep(1.5)
-            continue
-
-    if hist.empty:
-        return None, "No price history returned. Yahoo Finance may be temporarily unavailable."
-    return {"info": info, "hist": hist}, None
+    # Fallback to yfinance if FMP fails
+    try:
+        import time as _t
+        stk  = _yf_ticker(ticker)
+        fi   = stk.fast_info
+        last = getattr(fi, "last_price", None)
+        if not last or float(last) <= 0:
+            return None, f"Ticker '{ticker}' not found. Check the symbol and try again."
+        info = stk.info or {}
+        _t.sleep(0.3)
+        hist = stk.history(period=period, auto_adjust=True)
+        if hist.empty:
+            return None, "No price history returned."
+        return {"info": info, "hist": hist}, None
+    except Exception as e:
+        return None, str(e)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock(ticker, period="2y"):
     try:
-        result, err = _fetch_stock_uncached(ticker, period)
-        if err and ("too many requests" in err.lower() or "rate" in err.lower()):
-            # Raise so Streamlit does NOT cache this error
-            raise RuntimeError(err)
-        return result, err
-    except RuntimeError:
-        raise
+        return _fetch_stock_uncached(ticker, period)
     except Exception as e:
         return None, str(e)
 
