@@ -51,9 +51,21 @@ try:
 except Exception:
     pass
 
-def _yf_ticker(symbol):
-    """Simple yfinance Ticker wrapper — kept for compatibility."""
-    return yf.Ticker(symbol)
+# ── Free rotating proxy list for Yahoo Finance ───────────────────
+_YF_PROXIES = [
+    None,   # try direct first
+    "https://query1.finance.yahoo.com",
+    "https://query2.finance.yahoo.com",
+]
+
+def _yf_ticker(symbol, proxy=None):
+    """Simple yfinance Ticker wrapper."""
+    try:
+        if proxy:
+            return yf.Ticker(symbol, proxy=proxy)
+        return yf.Ticker(symbol)
+    except Exception:
+        return yf.Ticker(symbol)
 
 # ── Yahoo Finance rate-limit retry helper ─────────────────────────
 def _yf_history_safe(ticker_obj, retries=3, **kwargs):
@@ -582,65 +594,76 @@ def legend_html(items):
 #  DATA LAYER
 # ══════════════════════════════════════════════════════════════════
 def _fetch_stock_uncached(ticker, period="2y"):
-    """Inner fetch with retry — NOT cached so rate-limit errors are never stored.
-    Uses fast_info first (lightweight) then falls back to full info.
+    """Inner fetch with retry across multiple Yahoo endpoints.
+    Tries direct connection first, then falls back to alternate query endpoints.
     """
     import time as _t
-    stk = _yf_ticker(ticker)
 
-    # Step 1: validate ticker with fast_info (1 request, very light)
-    try:
-        fi = stk.fast_info
-        symbol_ok = bool(getattr(fi, "last_price", None) or getattr(fi, "market_cap", None))
-    except Exception:
-        symbol_ok = False
-
-    # Step 2: get full info with retry
-    info = None
-    for attempt in range(3):
+    # Step 1: validate ticker with fast_info (lightweight, 1 request)
+    symbol_ok = False
+    fi = None
+    for proxy in _YF_PROXIES:
         try:
-            info = stk.info
-            if info and len(info) > 5:
+            stk_test = _yf_ticker(ticker, proxy=proxy)
+            fi = stk_test.fast_info
+            last = getattr(fi, "last_price", None)
+            if last and float(last) > 0:
+                symbol_ok = True
                 break
-            _t.sleep(1)
+        except Exception:
+            _t.sleep(0.5)
+            continue
+
+    if not symbol_ok:
+        return None, f"Ticker '{ticker}' not found. Check the symbol and try again."
+
+    # Step 2: get full info — try each proxy until one works
+    info = None
+    for proxy in _YF_PROXIES:
+        try:
+            stk = _yf_ticker(ticker, proxy=proxy)
+            _t.sleep(0.3)
+            info = stk.info
+            if info and len(info) > 10:
+                break
+            info = None
         except Exception as e:
             msg = str(e).lower()
-            if "too many requests" in msg or "rate" in msg or "429" in msg:
-                _t.sleep(2 ** attempt)
-                continue
-            break
+            if "too many requests" in msg or "429" in msg:
+                _t.sleep(1.5)
+            continue
 
-    # Accept info if it has useful keys, or fall back to fast_info dict
-    if not info or len(info) < 5:
-        if not symbol_ok:
-            return None, f"Ticker '{ticker}' not found. Check the symbol and try again."
-        # Build minimal info from fast_info
+    # Fallback: build minimal info from fast_info if .info failed
+    if not info or len(info) < 10:
         try:
-            fi = stk.fast_info
             info = {
-                "shortName": ticker.upper(),
-                "longName":  ticker.upper(),
-                "regularMarketPrice": getattr(fi, "last_price", 0),
-                "marketCap": getattr(fi, "market_cap", 0),
-                "currency":  getattr(fi, "currency", "USD"),
+                "shortName":           ticker.upper(),
+                "longName":            ticker.upper(),
+                "regularMarketPrice":  getattr(fi, "last_price", 0),
+                "marketCap":           getattr(fi, "market_cap", 0),
+                "currency":            getattr(fi, "currency", "USD"),
+                "exchange":            getattr(fi, "exchange", ""),
+                "fiftyTwoWeekHigh":    getattr(fi, "year_high", 0),
+                "fiftyTwoWeekLow":     getattr(fi, "year_low", 0),
+                "sharesOutstanding":   getattr(fi, "shares", 0),
             }
         except Exception:
-            return None, f"Ticker '{ticker}' not found. Check the symbol and try again."
+            pass
 
-    # Step 3: get price history with retry
+    # Step 3: get price history — try each proxy until one works
     hist = pd.DataFrame()
-    for attempt in range(3):
+    for proxy in _YF_PROXIES:
         try:
-            _t.sleep(0.3)   # small polite delay between info and history
+            stk = _yf_ticker(ticker, proxy=proxy)
+            _t.sleep(0.3)
             hist = stk.history(period=period, auto_adjust=True)
             if not hist.empty:
                 break
         except Exception as e:
             msg = str(e).lower()
-            if "too many requests" in msg or "rate" in msg or "429" in msg:
-                _t.sleep(2 ** attempt)
-                continue
-            break
+            if "too many requests" in msg or "429" in msg:
+                _t.sleep(1.5)
+            continue
 
     if hist.empty:
         return None, "No price history returned. Yahoo Finance may be temporarily unavailable."
