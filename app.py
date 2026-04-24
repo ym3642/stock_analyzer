@@ -22,6 +22,27 @@ import time
 import requests
 import json, re, copy, math
 
+# ── Browser-like session for Yahoo Finance to avoid rate limiting ──
+_YF_SESSION = requests.Session()
+_YF_SESSION.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection":      "keep-alive",
+})
+
+def _yf_ticker(symbol):
+    """Create a yfinance Ticker with a browser-like session to reduce rate limiting."""
+    try:
+        return yf.Ticker(symbol, session=_YF_SESSION)
+    except Exception:
+        return yf.Ticker(symbol)
+
 # ── Yahoo Finance rate-limit retry helper ─────────────────────────
 def _yf_history_safe(ticker_obj, retries=3, **kwargs):
     """Wrap yfinance history() with exponential backoff for rate limits."""
@@ -551,7 +572,7 @@ def legend_html(items):
 def _fetch_stock_uncached(ticker, period="2y"):
     """Inner fetch with retry — NOT cached so rate-limit errors are never stored."""
     import time as _t
-    stk = yf.Ticker(ticker)
+    stk = _yf_ticker(ticker)
     # Retry info up to 3 times with backoff
     info = None
     for attempt in range(3):
@@ -607,7 +628,7 @@ def fetch_chart_history(ticker, period="1y", interval="1d", prepost=False):
     import time as _t
     for attempt in range(3):
         try:
-            h = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=True, prepost=prepost)
+            h = _yf_ticker(ticker).history(period=period, interval=interval, auto_adjust=True, prepost=prepost)
             if not h.empty:
                 return h, None
         except Exception as e:
@@ -626,7 +647,7 @@ def fetch_peers(tickers: tuple, period="1y"):
     out = {}
     for t in tickers:
         try:
-            s = yf.Ticker(t)
+            s = _yf_ticker(t)
             h = s.history(period=period, auto_adjust=True)
             if not h.empty:
                 out[t] = {"info": s.info, "hist": h}
@@ -636,7 +657,7 @@ def fetch_peers(tickers: tuple, period="1y"):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_spy(period="2y"):
-    return yf.Ticker("SPY").history(period=period, auto_adjust=True)
+    return _yf_ticker("SPY").history(period=period, auto_adjust=True)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -648,7 +669,7 @@ def fetch_financial_reports(ticker):
     when quarterly data has at least five columns, the same quarter last year.
     """
     try:
-        tk = yf.Ticker(ticker)
+        tk = _yf_ticker(ticker)
         return {
             "Quarterly Income Statement": tk.quarterly_financials,
             "Annual Income Statement": tk.financials,
@@ -721,7 +742,7 @@ def search_companies_by_keyword(keyword, max_results=12):
         if row.get("Market Cap", 0) > 0 and row.get("Company") and row.get("Company") != row.get("Ticker"):
             continue
         try:
-            info = yf.Ticker(row["Ticker"]).get_info()
+            info = _yf_ticker(row["Ticker"]).get_info()
             row["Market Cap"] = safe_float(info.get("marketCap"), row.get("Market Cap", 0))
             row["Company"] = str(info.get("shortName") or info.get("longName") or row.get("Company") or row["Ticker"])
             row["Exchange"] = str(info.get("exchange") or info.get("fullExchangeName") or row.get("Exchange") or "")
@@ -1760,7 +1781,7 @@ def fetch_news_items(ticker, keyword="", refresh_token=0):
     del refresh_token
     items = []
     try:
-        yf_news = yf.Ticker(ticker).news or []
+        yf_news = _yf_ticker(ticker).news or []
         for raw in yf_news[:35]:
             n = _extract_yf_news_item(raw, ticker)
             if n["title"]:
@@ -2064,7 +2085,7 @@ def fetch_market_news(keyword="", ticker_query="", refresh_token=0):
     ticker_company = ""
     if ticker_query:
         try:
-            tinfo = yf.Ticker(ticker_query).get_info()
+            tinfo = _yf_ticker(ticker_query).get_info()
             ticker_company = clean_text(tinfo.get("shortName") or tinfo.get("longName") or "")
         except Exception:
             ticker_company = ""
@@ -2075,7 +2096,7 @@ def fetch_market_news(keyword="", ticker_query="", refresh_token=0):
         market_symbols.insert(0, ticker_query)
     for symbol in market_symbols:
         try:
-            for raw in (yf.Ticker(symbol).news or [])[:12]:
+            for raw in (_yf_ticker(symbol).news or [])[:12]:
                 n = _extract_yf_news_item(raw, symbol)
                 if n.get("title"):
                     n["publisher"] = n.get("publisher") or "Yahoo Finance"
@@ -2730,7 +2751,7 @@ def fetch_market_regime_for_investor(refresh_token=0):
     rows = {}
     for sym in symbols:
         try:
-            h = yf.Ticker(sym).history(period="1y", auto_adjust=True)
+            h = _yf_ticker(sym).history(period="1y", auto_adjust=True)
             if h is None or h.empty or "Close" not in h:
                 continue
             close = h["Close"].dropna()
@@ -2773,7 +2794,7 @@ def fetch_investor_universe_data(tickers_tuple, refresh_token=0):
         if str(t).upper() in {"CASH", "CASH / T-BILLS"}:
             continue
         try:
-            tk = yf.Ticker(t)
+            tk = _yf_ticker(t)
             info = tk.info or {}
             hist = tk.history(period="1y", auto_adjust=True)
             if hist is None or hist.empty or "Close" not in hist:
@@ -3535,7 +3556,7 @@ def fetch_investor_backtest_prices(tickers_tuple, period="1y", refresh_token=0):
         if not t or t in {"CASH", "CASH / T-BILLS", "CASH / T-BILLS (3M)"}:
             continue
         try:
-            h = yf.Ticker(t).history(period=yf_period, auto_adjust=True)
+            h = _yf_ticker(t).history(period=yf_period, auto_adjust=True)
             if h is None or h.empty or "Close" not in h.columns:
                 continue
             close = pd.to_numeric(h["Close"], errors="coerce").dropna().rename(t)
@@ -3573,7 +3594,7 @@ def _fetch_spy_benchmark(period="1y", refresh_token=0):
         else:
             yf_p = period
             cutoff = None
-        h = yf.Ticker("SPY").history(period=yf_p, auto_adjust=True)
+        h = _yf_ticker("SPY").history(period=yf_p, auto_adjust=True)
         if h is None or h.empty or "Close" not in h.columns:
             return pd.Series(dtype=float)
         close = pd.to_numeric(h["Close"], errors="coerce").dropna()
@@ -4745,7 +4766,7 @@ def ranking_snapshot(tickers_tuple, period="3mo"):
     rows=[]
     for t in tickers_tuple:
         try:
-            y=yf.Ticker(t); h=y.history(period=period, auto_adjust=True)
+            y=_yf_ticker(t); h=y.history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h)<2: continue
             close=h["Close"].dropna(); last=float(close.iloc[-1]); prev=float(close.iloc[-2])
             chg=last-prev; pct=chg/prev*100 if prev else 0.0
@@ -4788,12 +4809,12 @@ def ai_score_universe(tickers_tuple, period="1y", model="risk_loving"):
     """Score a universe with the same built-in AI thesis model, grouped by reported industry."""
     rows = []
     try:
-        spy_hist = yf.Ticker("SPY").history(period=period, auto_adjust=True)
+        spy_hist = _yf_ticker("SPY").history(period=period, auto_adjust=True)
     except Exception:
         spy_hist = pd.DataFrame()
     for t in tickers_tuple:
         try:
-            y = yf.Ticker(t)
+            y = _yf_ticker(t)
             h = y.history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h) < 35:
                 continue
@@ -4848,7 +4869,7 @@ def index_snapshot(period="1mo"):
     for order, meta in enumerate(GLOBAL_INDEXES):
         name, sym = meta["Index"], meta["Ticker"]
         try:
-            h = yf.Ticker(sym).history(period=period, auto_adjust=True)
+            h = _yf_ticker(sym).history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h) < 2:
                 continue
             close = h["Close"].dropna()
@@ -4884,7 +4905,7 @@ def commodity_snapshot(period="3mo"):
     for meta in COMMODITIES:
         name, sym = meta["Commodity"], meta["Ticker"]
         try:
-            h = yf.Ticker(sym).history(period=period, auto_adjust=True)
+            h = _yf_ticker(sym).history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h) < 2:
                 continue
             close = h["Close"].dropna()
