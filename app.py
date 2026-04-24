@@ -1,5 +1,5 @@
 """
-Stock Analyzer Pro — Premium Trading Terminal
+SmartStock — Premium Trading Terminal
 Webull-style charts · Clean legends · No overlaps · Built-in AI thesis
 Run: streamlit run app.py
 """
@@ -20,10 +20,28 @@ import xml.etree.ElementTree as ET
 import html
 import time
 import requests
-import json, re, copy
+import json, re, copy, math
+
+# ── Yahoo Finance rate-limit retry helper ─────────────────────────
+def _yf_history_safe(ticker_obj, retries=3, **kwargs):
+    """Wrap yfinance history() with exponential backoff for rate limits."""
+    import time as _time
+    for attempt in range(retries):
+        try:
+            h = ticker_obj.history(**kwargs)
+            if h is not None and not h.empty:
+                return h
+        except Exception as e:
+            msg = str(e).lower()
+            if "too many requests" in msg or "rate limit" in msg or "429" in msg:
+                wait = 2 ** attempt
+                _time.sleep(wait)
+                continue
+            raise
+    return pd.DataFrame()
 
 st.set_page_config(
-    page_title="Stock Analyzer Pro",
+    page_title="SmartStock",
     page_icon="📈",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -64,7 +82,27 @@ st.markdown("""
 [data-testid="stSidebar"] [data-testid="stExpander"]{margin-top:0.20rem!important;margin-bottom:0.20rem!important;}
 body,p,li,span,label,div{color:var(--text);}
 h1,h2,h3,h4{color:#f1f5f9!important;font-weight:600;}
-.block-container{padding:1.5rem 2rem 3rem!important;max-width:1600px!important;}
+.block-container{padding:7.5rem 2rem 3rem!important;max-width:1600px!important;}
+
+/* Main content top clearance: prevents Streamlit's fixed top toolbar/header from covering page headers */
+[data-testid="stMain"] [data-testid="block-container"]{
+  padding-top:8.25rem!important;
+  padding-left:2rem!important;
+  padding-right:2rem!important;
+  padding-bottom:3rem!important;
+  max-width:1600px!important;
+}
+header[data-testid="stHeader"]{
+  background:rgba(13,15,20,0.96)!important;
+  backdrop-filter:blur(8px)!important;
+  border-bottom:1px solid #1d2430!important;
+}
+[data-testid="stToolbar"]{right:0.75rem!important;top:0.35rem!important;}
+
+/* Extra fixed-header safety spacing for newer Streamlit versions */
+section.main > div { padding-top: 7.5rem !important; }
+[data-testid="stAppViewContainer"] > .main .block-container { padding-top: 8.25rem !important; }
+div[data-testid="stVerticalBlock"]:first-child { scroll-margin-top: 8rem !important; }
 
 [data-testid="metric-container"]{
   background:var(--bg2)!important;border:1px solid var(--border)!important;
@@ -165,9 +203,68 @@ button[kind="primary"]{background:var(--accent)!important;border-color:var(--acc
 .news-neutral{border-color:rgba(245,158,11,.35);color:#f59e0b;background:rgba(245,158,11,.08);}
 @media(max-width:900px){.top-header{grid-template-columns:1fr}.top-header-price{text-align:left;min-width:0}}
 
+
+.market-impact-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-top:10px;}
+.market-impact-box{background:#0f131b;border:1px solid #243044;border-radius:10px;padding:10px 12px;min-height:76px;}
+.market-impact-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.10em;font-weight:800;margin-bottom:6px;}
+.market-impact-good{color:#10b981;font-size:12px;line-height:1.55;}
+.market-impact-bad{color:#ef4444;font-size:12px;line-height:1.55;}
+.market-impact-watch{color:#f59e0b;font-size:12px;line-height:1.55;}
+.market-source-link{display:inline-flex;align-items:center;gap:4px;margin-top:9px;color:#60a5fa!important;text-decoration:none!important;font-size:12px;font-weight:700;}
+.market-card-top{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px;}
+.market-score-ring{min-width:52px;height:52px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at center,#13161e 55%,transparent 56%),conic-gradient(#3b82f6 calc(var(--score)*1%),#252a38 0);font-family:monospace;font-size:13px;font-weight:800;color:#e2e8f0;}
+@media(max-width:950px){.market-impact-grid{grid-template-columns:1fr;}.market-score-ring{width:46px;height:46px;min-width:46px;}}
+
 .comment-box{background:#10131a;border:1px solid #243044;border-radius:12px;padding:13px 15px;margin-top:18px;color:#94a3b8;font-size:12px;line-height:1.65;}
 .comment-box b{color:#e2e8f0;}
 .comment-title{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:#64748b;font-weight:800;margin-bottom:6px;}
+
+
+/* Premium interaction polish */
+*{scroll-behavior:smooth;}
+[data-testid="stButton"]>button,[data-baseweb="select"]>div,[data-testid="stTextInput"] input,[data-testid="stCheckbox"] label,[data-testid="stExpander"],[data-testid="metric-container"],.news-card,.bull-card,.bear-card,.verdict-card{transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease,background .18s ease,opacity .18s ease!important;}
+[data-testid="stButton"]>button{min-height:38px!important;box-shadow:0 8px 22px rgba(0,0,0,.18)!important;}
+[data-testid="stButton"]>button:hover{transform:translateY(-1px)!important;box-shadow:0 12px 28px rgba(0,0,0,.28),0 0 0 1px rgba(59,130,246,.18)!important;}
+[data-testid="stButton"]>button:active{transform:translateY(0)!important;filter:brightness(.96)!important;}
+button[kind="primary"]{background:linear-gradient(135deg,#2563eb,#3b82f6,#06b6d4)!important;box-shadow:0 12px 32px rgba(59,130,246,.24)!important;}
+[data-testid="metric-container"]:hover,.news-card:hover,.bull-card:hover,.bear-card:hover,.verdict-card:hover{transform:translateY(-1px);box-shadow:0 16px 34px rgba(0,0,0,.22);}
+[data-testid="stDataFrame"],.js-plotly-plot{border-radius:14px!important;overflow:hidden!important;animation:fadeSlideIn .24s ease both;}
+@keyframes fadeSlideIn{from{opacity:.0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.pro-chart-shell{background:linear-gradient(180deg,rgba(19,22,30,.92),rgba(13,15,20,.92));border:1px solid #252a38;border-radius:16px;padding:10px 10px 2px;margin-bottom:6px;box-shadow:0 18px 44px rgba(0,0,0,.18);}
+.pro-subnav{background:#10131a;border:1px solid #252a38;border-radius:16px;padding:10px 12px;margin:-2px 0 18px;box-shadow:0 12px 30px rgba(0,0,0,.16);}
+.pro-subnav-title{font-size:10px;text-transform:uppercase;letter-spacing:.14em;color:#64748b;margin-bottom:8px;font-weight:800;}
+.pro-back-row{display:flex;justify-content:flex-end;margin:-4px 0 12px;}
+.stRadio [role="radiogroup"]{gap:.38rem!important;flex-wrap:wrap!important;}
+.stRadio [role="radiogroup"] label{background:#13161e!important;border:1px solid #252a38!important;border-radius:999px!important;padding:7px 13px!important;margin:0!important;min-height:34px!important;transition:all .18s ease!important;}
+.stRadio [role="radiogroup"] label:hover{border-color:#3b82f6!important;transform:translateY(-1px);}
+.stRadio [role="radiogroup"] label[data-checked="true"]{background:rgba(59,130,246,.18)!important;border-color:#3b82f6!important;box-shadow:0 0 0 1px rgba(59,130,246,.18)!important;}
+.stRadio [role="radiogroup"] label p{font-size:12px!important;font-weight:700!important;color:#cbd5e1!important;}
+.stSpinner > div{border-color:#3b82f6 transparent transparent transparent!important;}
+
+
+/* Investor View */
+.investor-card{background:linear-gradient(135deg,rgba(59,130,246,.10),rgba(139,92,246,.07));border:1px solid #263248;border-radius:16px;padding:18px 20px;margin-bottom:14px;box-shadow:0 12px 30px rgba(0,0,0,.18);}
+.investor-title{font-size:22px;font-weight:800;color:#f8fafc;letter-spacing:-.02em;margin-bottom:4px;}
+.investor-subtitle{font-size:13px;color:#94a3b8;line-height:1.55;}
+.investor-pill-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;}
+.investor-pill{display:inline-flex;align-items:center;gap:6px;border:1px solid #334155;background:#111827;border-radius:999px;padding:5px 10px;font-size:11px;color:#cbd5e1;font-weight:700;}
+.investor-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:10px 0 24px;}
+.investor-allocation-section{margin-top:8px;}
+.investor-allocation-section .section-head{margin-top:0.25rem!important;margin-bottom:0.55rem!important;}
+.investor-mini{background:#111827;border:1px solid #243044;border-radius:14px;padding:14px 15px;transition:all .18s ease;}
+.investor-mini:hover{transform:translateY(-2px);border-color:#3b82f6;box-shadow:0 12px 24px rgba(0,0,0,.20);}
+.investor-mini-label{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.10em;margin-bottom:6px;font-weight:800;}
+.investor-mini-value{font-size:18px;color:#f8fafc;font-weight:800;font-family:monospace;line-height:1.15;}
+.investor-note{background:#0f172a;border:1px solid #263248;border-radius:14px;padding:14px 16px;color:#94a3b8;font-size:13px;line-height:1.65;margin:10px 0;}
+.investor-note b{color:#e2e8f0;}
+.investor-ai-box{background:linear-gradient(135deg,rgba(15,23,42,.98),rgba(30,41,59,.82));border:1px solid #334155;border-radius:16px;padding:17px 19px;margin:12px 0 18px;box-shadow:0 14px 34px rgba(0,0,0,.22);}
+.investor-ai-kicker{font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:.14em;font-weight:900;margin-bottom:7px;}
+.investor-ai-headline{font-size:19px;color:#f8fafc;font-weight:850;letter-spacing:-.015em;line-height:1.25;margin-bottom:8px;}
+.investor-ai-body{font-size:13px;color:#cbd5e1;line-height:1.72;}
+.investor-ai-body b{color:#f8fafc;}
+@media(max-width:1100px){.investor-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
+@media(max-width:700px){.investor-grid{grid-template-columns:1fr;}}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -188,13 +285,13 @@ AMBER    = "#f59e0b"; PURPLE="#8b5cf6"; TEAL  = "#06b6d4"
 LANG_OPTIONS = {"English": "en", "简体中文": "zh"}
 
 ZH = {
-    "Stock Analyzer": "股票分析器", "PROFESSIONAL EDITION": "专业版", "Language": "语言",
-    "Overview": "概览", "Valuation": "估值", "Risk": "风险", "Industry": "行业", "Technical": "技术分析", "Comparison": "对比", "News": "新闻", "Market Rankings": "市场排名", "Global Indexes": "全球指数", "Commodities": "大宗商品", "AI Thesis": "AI投资论点",
+    "SmartStock": "股票分析器", "PROFESSIONAL EDITION": "专业版", "Language": "语言",
+    "Overview": "概览", "Valuation": "估值", "Risk": "风险", "Industry": "行业", "Technical": "技术分析", "Comparison": "对比", "Company News": "公司新闻", "News": "新闻", "Market News": "全球市场新闻", "Market Rankings": "市场排名", "Global Indexes": "全球指数", "Commodities": "大宗商品", "AI Thesis": "AI投资论点",
     "Price Chart": "价格图表", "Fundamentals": "基本面", "About": "公司简介", "Business Summary": "业务摘要", "Valuation Multiples": "估值倍数", "Analyst Consensus": "分析师共识",
     "Interactive DCF Fair Value Calculator": "交互式DCF公允价值计算器", "Quality & Profitability": "质量与盈利能力", "Risk & Performance Metrics vs S&P 500": "相对标普500的风险与表现指标",
     "Drawdown from Peak": "峰值回撤", "Daily Return Distribution": "日收益率分布", "Rolling 60-Day Sharpe Ratio": "60日滚动夏普比率", "Annualised Rolling Volatility": "年化滚动波动率",
     "Financial Health": "财务健康状况", "Industry Snapshot": "行业概况", "Peer Comparison": "同业比较", "Technical Indicators": "技术指标", "Support / Resistance": "支撑位 / 阻力位",
-    "Latest Stock / Company News": "最新股票/公司新闻", "Built-in AI Investment Thesis": "内置AI投资论点", "Built-in AI-Style Comparison Summary": "内置AI风格对比总结",
+    "Latest Stock / Company News": "最新股票/公司新闻", "Latest Company News": "最新公司新闻", "Built-in AI Investment Thesis": "内置AI投资论点", "Built-in AI-Style Comparison Summary": "内置AI风格对比总结",
     "Ticker Symbol": "股票代码", "Historical Data Range": "历史数据范围", "Chart View Window": "图表显示窗口", "Price Chart Overlays": "价格图表叠加指标", "Moving Average Lines": "移动平均线",
     "Data period": "数据周期", "Chart window": "图表窗口", "Show pre-market / after-hours curve": "显示盘前/盘后曲线",
     "Regular-hours view: 9:30 AM–4:00 PM ET only. Overnight gaps are removed from the x-axis.": "常规交易时段视图：仅显示美国东部时间上午9:30至下午4:00，横轴会移除隔夜空白。",
@@ -208,12 +305,141 @@ ZH = {
     "Annual Vol.": "年化波动率", "Sharpe Ratio": "夏普比率", "Sortino": "索提诺比率", "Max Drawdown": "最大回撤", "Calmar Ratio": "卡玛比率", "1yr Return": "1年收益率",
     "Alpha vs SPY": "相对SPY阿尔法", "VaR 95%": "95%风险价值", "CVaR 95%": "95%条件风险价值", "Win Rate": "胜率", "R² vs SPY": "相对SPY的R²", "Tracking Err": "跟踪误差", "Info Ratio": "信息比率",
     "Size": "规模", "Exchange": "交易所", "RSI (14-day)": "RSI(14日)", "ADX (14-day)": "ADX(14日)", "ATR (14-day)": "ATR(14日)", "Volatility 20d": "20日波动率",
-    "Important Headlines": "重要新闻数", "Positive": "利好", "Negative": "利空", "Neutral": "中性", "Avg Influence": "平均影响", "Search news by keyword": "按关键词搜索新闻", "Order news by": "新闻排序",
-    "Importance first": "重要性优先", "Newest first": "最新优先", "Update News": "更新新闻", "Open source": "打开来源", "Influence": "股价影响", "Importance": "重要性",
+    "Important Headlines": "重要新闻数", "Positive": "利好", "Negative": "利空", "Neutral": "中性", "Avg Influence": "平均影响", "Search news by keyword": "按关键词搜索新闻", "Search market news by keyword": "按关键词搜索市场新闻", "Search market news by ticker": "按股票代码搜索市场新闻", "Order news by": "新闻排序", "Order by": "排序方式",
+    "Importance first": "重要性优先", "Newest first": "最新优先", "Update News": "更新新闻", "Update": "更新", "Open source": "打开来源", "Influence": "股价影响", "Importance": "重要性",
     "No short summary was provided by the source.": "来源未提供简短摘要。", "No matching recent news found. Try a broader keyword or click Update News.": "未找到匹配的近期新闻。请尝试更宽泛的关键词，或点击更新新闻。",
+    "Latest Market News": "最新全球市场新闻", "Market news by importance/time with AI-style impact analysis.": "按重要性/发布时间排序的全球市场新闻，并带AI风格影响分析。", "Country Filter": "国家筛选", "Category Filter": "类别筛选", "Industry Impact Filter": "行业影响筛选", "Update Market News": "更新市场新闻",
     "Priority: Yahoo Finance/yfinance first, then WSJ/RSS and broad financial news. Duplicate/overlapping headlines are filtered.": "优先级：Yahoo Finance/yfinance优先，其次为WSJ/RSS和其他财经新闻；重复或重叠标题会被过滤。",
     "Market Movers & Volatility Ranking": "市场异动与波动率排名", "Global Index Performance": "全球主要指数表现", "Industry Filter": "行业筛选", "Ranking Size": "排名数量", "Ranking Metric": "排名指标", "Update Rankings": "更新排名", "Top Movers Table": "异动股票表", "Top Price Change Chart": "价格变动排名图", "Top Volatility Chart": "波动率排名图", "All Industries": "全部行业", "Technology": "科技", "Semiconductors": "半导体", "Software": "软件", "Financials": "金融", "Energy": "能源", "Healthcare": "医疗保健", "Consumer": "消费", "Ticker": "股票代码", "Company": "公司", "Last Price": "最新价", "Change $": "价格变化$", "Change %": "涨跌幅%", "20D Vol %": "20日波动率%", "Volume Ratio": "成交量倍数", "Investment Note": "投资备注", "Major Index Curves": "主要指数走势", "Index Ranking by % Change": "按涨跌幅排名的指数", "Commodity Dashboard": "大宗商品仪表盘", "Commodity Curves": "大宗商品走势", "Commodity Indicators": "大宗商品指标", "Display indexes on chart": "选择图表显示的指数", "Display commodities on chart": "选择图表显示的大宗商品",
 }
+
+
+ZH.update({
+    "Company News": "公司新闻",
+    "Search Company by Name": "按公司名称搜索",
+    "Company keyword search": "公司关键词搜索",
+    "Matching companies": "匹配公司",
+    "Use selected company": "使用选中的公司",
+    "No company matches found. Try a broader keyword or type the ticker directly.": "未找到匹配公司。请尝试更宽泛的关键词，或直接输入股票代码。",
+    "Direct ticker symbol": "直接输入股票代码",
+    "Search market news by keyword": "按关键词搜索市场新闻",
+    "Search market news by ticker": "按股票代码搜索市场新闻",
+    "Order by": "排序方式",
+    "Number of headlines": "新闻数量",
+    "Headlines": "新闻条数",
+    "Avg Importance": "平均重要性",
+    "Global Items": "全球新闻数",
+    "Top Theme": "主要主题",
+    "Good for": "利好对象",
+    "Bad for": "利空对象",
+    "Watch": "关注事项",
+    "Affected": "相关标的",
+    "Importance": "重要性",
+    "Open source": "打开来源",
+    "Mixed / Watch": "混合/观察",
+    "All Categories": "全部类别",
+    "Policy / Regulation": "政策/监管",
+    "Central Bank / Rates": "央行/利率",
+    "Geopolitics / Conflict": "地缘政治/冲突",
+    "Financial Release": "经济/财务发布",
+    "Management Change": "管理层变动",
+    "M&A / Strategic Deal": "并购/战略交易",
+    "Commodities / Energy": "大宗商品/能源",
+    "Technology / AI": "科技/人工智能",
+    "Banking / Credit": "银行/信用",
+    "Healthcare / FDA": "医疗/FDA",
+    "Earnings / Guidance": "财报/指引",
+    "Macro Data": "宏观数据",
+    "Legal / Investigation": "法律/调查",
+    "General Market News": "一般市场新闻",
+    "All Countries": "全部国家/地区",
+    "United States": "美国",
+    "Global": "全球",
+    "China": "中国",
+    "Europe": "欧洲",
+    "Japan": "日本",
+    "Middle East": "中东",
+    "United Kingdom": "英国",
+    "Canada": "加拿大",
+    "Emerging Markets": "新兴市场",
+    "Software / Cloud": "软件/云计算",
+    "Banks": "银行",
+    "Defense": "国防",
+    "Airlines / Travel": "航空/旅游",
+    "Shipping": "航运",
+    "Industrials": "工业",
+    "Consumer / Retail": "消费/零售",
+    "Autos": "汽车",
+    "Biotech": "生物科技",
+    "Utilities": "公用事业",
+    "Real Estate": "房地产",
+    "Materials": "材料",
+    "Crypto": "加密资产",
+    "No broad market news matched these filters. Try a broader keyword, ticker, country, category, or industry filter.": "没有符合筛选条件的市场新闻。请尝试更宽泛的关键词、股票代码、国家/地区、类别或行业筛选。",
+    "Market news by importance/time with AI-style impact analysis. Sources prioritize yfinance/Yahoo Finance and WSJ first, then reliable broad RSS discovery.": "按重要性/发布时间展示全球市场新闻，并提供AI风格影响分析。来源优先使用yfinance/Yahoo Finance和WSJ，其次使用可靠的广泛RSS新闻。",
+})
+
+
+ZH.update({
+    "Investor View": "投资大师视角",
+    "Famous Investor Simulator": "投资大师模拟器",
+    "Investor profile": "投资者风格",
+    "Model blend": "模型融合比例",
+    "Max holdings": "最大持仓数量",
+    "Market stance": "市场立场",
+    "Use latest market-news shock layer": "使用最新市场新闻冲击层",
+    "Balanced": "平衡",
+    "Defensive": "防御",
+    "Aggressive": "进攻",
+    "Simulated portfolio": "模拟组合",
+    "Sector allocation": "板块配置",
+    "Portfolio allocation": "组合配置",
+    "Style Match": "风格匹配",
+    "Conviction": "信心强度",
+    "Risk Level": "风险水平",
+    "Cash / Defense": "现金/防御",
+    "Current market view": "当前市场观点",
+    "What this investor may like now": "当前可能偏好的方向",
+    "What this investor may avoid now": "当前可能回避的方向",
+    "Open-source model blend": "开源模型融合",
+    "This is a simulated educational model, not the real investor's opinion or financial advice.": "这是教育用途的模拟模型，并不代表该投资者真实观点，也不是投资建议。",
+    "Company / Asset": "公司/资产",
+    "Weight": "权重",
+    "Reason": "原因",
+    "Investor-style thesis": "投资者风格论点",
+    "Market Regime": "市场环境",
+    "Risk-on Score": "风险偏好评分",
+    "Top Sector": "最大板块",
+    "Concentration": "集中度",
+    "Use selected investor portfolio as watchlist": "将模拟组合用作观察清单",
+    "Investor decision backtest & comparison": "投资者决策回测与对比",
+    "Backtest window": "回测窗口",
+    "Backtest method": "回测方法",
+    "Monthly": "月度再平衡",
+    "Buy & Hold": "买入并持有",
+    "Compare two investor decisions": "对比两个投资者决策",
+    "Compare with": "对比对象",
+    "Enable comparison to test another investor model.": "启用对比以测试另一个投资者模型。",
+    "Total Return": "总收益率",
+    "Annual Return": "年化收益率",
+    "Annual Volatility": "年化波动率",
+    "Max Drawdown": "最大回撤",
+    "Sharpe": "夏普比率",
+    "Sortino": "索提诺比率",
+    "Calmar": "卡玛比率",
+    "VaR 95%": "95%风险价值",
+    "CVaR 95%": "95%条件风险价值",
+    "Win Rate": "胜率",
+    "Best Day": "最佳单日",
+    "Worst Day": "最差单日",
+    "Cash Weight": "现金权重",
+    "simulated holdings": "模拟持仓",
+    "Equity Exposure": "权益仓位",
+    "AI portfolio explanation": "AI组合解释",
+    "AI concise header": "AI简明标题",
+    "Why this portfolio": "为什么这样配置",
+    "Key indicators": "关键指标",
+})
 
 FIN_GLOSSARY = {
     "earnings": "财报/盈利", "revenue": "营收", "guidance": "业绩指引", "analyst": "分析师", "rating": "评级", "price target": "目标价", "upgrade": "上调评级", "downgrade": "下调评级",
@@ -322,36 +548,80 @@ def legend_html(items):
 # ══════════════════════════════════════════════════════════════════
 #  DATA LAYER
 # ══════════════════════════════════════════════════════════════════
-@st.cache_data(ttl=300, show_spinner=False)
+def _fetch_stock_uncached(ticker, period="2y"):
+    """Inner fetch with retry — NOT cached so rate-limit errors are never stored."""
+    import time as _t
+    stk = yf.Ticker(ticker)
+    # Retry info up to 3 times with backoff
+    info = None
+    for attempt in range(3):
+        try:
+            info = stk.info
+            if info and ("longName" in info or "shortName" in info):
+                break
+        except Exception as e:
+            msg = str(e).lower()
+            if "too many requests" in msg or "rate" in msg or "429" in msg:
+                _t.sleep(2 ** attempt)
+                continue
+            raise
+    if not info or ("longName" not in info and "shortName" not in info):
+        return None, f"Ticker '{ticker}' not found or data unavailable."
+    # Retry history up to 3 times
+    hist = pd.DataFrame()
+    for attempt in range(3):
+        try:
+            hist = stk.history(period=period, auto_adjust=True)
+            if not hist.empty:
+                break
+        except Exception as e:
+            msg = str(e).lower()
+            if "too many requests" in msg or "rate" in msg or "429" in msg:
+                _t.sleep(2 ** attempt)
+                continue
+            raise
+    if hist.empty:
+        return None, "No price history returned."
+    return {"info": info, "hist": hist}, None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock(ticker, period="2y"):
     try:
-        stk  = yf.Ticker(ticker)
-        info = stk.info
-        if not info or "longName" not in info:
-            return None, f"Ticker '{ticker}' not found."
-        hist = stk.history(period=period, auto_adjust=True)
-        if hist.empty:
-            return None, "No price history returned."
-        return {"info": info, "hist": hist}, None
+        result, err = _fetch_stock_uncached(ticker, period)
+        if err and ("too many requests" in err.lower() or "rate" in err.lower()):
+            # Raise so Streamlit does NOT cache this error
+            raise RuntimeError(err)
+        return result, err
+    except RuntimeError:
+        raise
     except Exception as e:
         return None, str(e)
 
 
-@st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_chart_history(ticker, period="1y", interval="1d", prepost=False):
     """Fetch chart data separately so short windows can use intraday bars.
     prepost=True includes pre-market and after-hours bars for intraday charts.
     """
-    try:
-        h = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=True, prepost=prepost)
-        if h.empty:
-            return None, "No chart history returned."
-        return h, None
-    except Exception as e:
-        return None, str(e)
+    import time as _t
+    for attempt in range(3):
+        try:
+            h = yf.Ticker(ticker).history(period=period, interval=interval, auto_adjust=True, prepost=prepost)
+            if not h.empty:
+                return h, None
+        except Exception as e:
+            msg = str(e).lower()
+            if "too many requests" in msg or "rate" in msg or "429" in msg:
+                if attempt < 2:
+                    _t.sleep(2 ** attempt)
+                    continue
+                raise RuntimeError(str(e))
+            return None, str(e)
+    return None, "No chart history returned."
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_peers(tickers: tuple, period="1y"):
     out = {}
     for t in tickers:
@@ -364,9 +634,284 @@ def fetch_peers(tickers: tuple, period="1y"):
     return out
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_spy(period="2y"):
     return yf.Ticker("SPY").history(period=period, auto_adjust=True)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_financial_reports(ticker):
+    """Fetch the three major statements from yfinance.
+
+    Returns quarterly and annual income statement, balance sheet, and cash flow
+    statements.  The UI compares the latest period with the previous period and,
+    when quarterly data has at least five columns, the same quarter last year.
+    """
+    try:
+        tk = yf.Ticker(ticker)
+        return {
+            "Quarterly Income Statement": tk.quarterly_financials,
+            "Annual Income Statement": tk.financials,
+            "Quarterly Balance Sheet": tk.quarterly_balance_sheet,
+            "Annual Balance Sheet": tk.balance_sheet,
+            "Quarterly Cash Flow": tk.quarterly_cashflow,
+            "Annual Cash Flow": tk.cashflow,
+        }, None
+    except Exception as e:
+        return {}, str(e)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_companies_by_keyword(keyword, max_results=12):
+    """Search Yahoo Finance by company name/keyword and rank results by market cap.
+
+    Uses yfinance.Search when available and falls back to Yahoo's public search
+    endpoint. Market-cap enrichment is intentionally capped so the sidebar stays
+    responsive and avoids unnecessary Yahoo rate-limit pressure.
+    """
+    keyword = clean_text(keyword or "").strip() if "clean_text" in globals() else str(keyword or "").strip()
+    if len(keyword) < 2:
+        return []
+
+    rows = []
+
+    def add_quote(q):
+        if not isinstance(q, dict):
+            return
+        symbol = str(q.get("symbol") or q.get("ticker") or "").strip().upper()
+        if not symbol:
+            return
+        # Keep the search focused on listed companies/ETFs, not futures, indexes, FX, or options.
+        quote_type = str(q.get("quoteType") or q.get("typeDisp") or "").upper()
+        if symbol.startswith("^") or "=F" in symbol or quote_type in {"INDEX", "FUTURE", "CURRENCY", "CRYPTOCURRENCY", "OPTION"}:
+            return
+        name = str(q.get("shortname") or q.get("longname") or q.get("shortName") or q.get("longName") or q.get("name") or symbol).strip()
+        exchange = str(q.get("exchDisp") or q.get("exchange") or q.get("fullExchangeName") or "").strip()
+        market_cap = safe_float(q.get("marketCap") or q.get("market_cap") or 0, 0)
+        rows.append({"Ticker": symbol, "Company": name, "Exchange": exchange, "Market Cap": market_cap, "Quote Type": quote_type or "EQUITY"})
+
+    try:
+        search_obj = yf.Search(keyword, max_results=max_results * 2)
+        for q in getattr(search_obj, "quotes", []) or []:
+            add_quote(q)
+    except Exception:
+        pass
+
+    if not rows:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 StockAnalyzer/1.0"}
+            params = {"q": keyword, "quotesCount": max_results * 2, "newsCount": 0, "enableFuzzyQuery": "true", "quotesQueryId": "tss_match_phrase_query"}
+            r = requests.get("https://query1.finance.yahoo.com/v1/finance/search", params=params, headers=headers, timeout=6)
+            if r.ok:
+                for q in (r.json().get("quotes") or []):
+                    add_quote(q)
+        except Exception:
+            pass
+
+    # Deduplicate while preserving the best available market-cap/name fields.
+    by_symbol = {}
+    for row in rows:
+        sym = row["Ticker"]
+        if sym not in by_symbol or row.get("Market Cap", 0) > by_symbol[sym].get("Market Cap", 0):
+            by_symbol[sym] = row
+    rows = list(by_symbol.values())[:max_results * 2]
+
+    # Enrich missing market caps so dropdown can truly be ordered by market cap.
+    for row in rows[:max_results]:
+        if row.get("Market Cap", 0) > 0 and row.get("Company") and row.get("Company") != row.get("Ticker"):
+            continue
+        try:
+            info = yf.Ticker(row["Ticker"]).get_info()
+            row["Market Cap"] = safe_float(info.get("marketCap"), row.get("Market Cap", 0))
+            row["Company"] = str(info.get("shortName") or info.get("longName") or row.get("Company") or row["Ticker"])
+            row["Exchange"] = str(info.get("exchange") or info.get("fullExchangeName") or row.get("Exchange") or "")
+        except Exception:
+            pass
+
+    rows = sorted(rows, key=lambda x: (safe_float(x.get("Market Cap"), 0), x.get("Company", "")), reverse=True)
+    return rows[:max_results]
+
+
+def _format_market_cap_short(value):
+    value = safe_float(value, 0)
+    if value >= 1e12:
+        return f"${value/1e12:.2f}T"
+    if value >= 1e9:
+        return f"${value/1e9:.1f}B"
+    if value >= 1e6:
+        return f"${value/1e6:.0f}M"
+    return "Mkt cap n/a"
+
+
+def _company_search_label(row):
+    cap = _format_market_cap_short(row.get("Market Cap"))
+    exch = row.get("Exchange") or "Yahoo"
+    return f"{row.get('Ticker','')} · {row.get('Company','')} · {exch} · {cap}"
+
+
+def _finite(v):
+    try:
+        v = float(v)
+        return v if np.isfinite(v) else np.nan
+    except Exception:
+        return np.nan
+
+
+def _score_color_label(score):
+    if score >= 80:
+        return "Strongly Bullish", GREEN
+    if score >= 62:
+        return "Bullish", GREEN
+    if score >= 48:
+        return "Neutral / Mixed", AMBER
+    if score >= 32:
+        return "Bearish", RED
+    return "Strongly Bearish", RED
+
+
+def technical_signal_model(df, fallback_price=None):
+    """Weighted technical signal model.
+
+    The old version counted green icons equally. This version weights trend,
+    momentum, overextension, trend strength, and volume confirmation. Scores are
+    normalized only across indicators that have enough valid data, so a short
+    chart window does not create false bullish/bearish readings.
+    """
+    if df is None or df.empty:
+        return {"score": 50.0, "label": "Neutral / Mixed", "color": AMBER, "components": [], "usable_weight": 0.0}
+
+    clean = df.copy()
+    last = clean.iloc[-1]
+    close = pd.to_numeric(clean.get("Close", pd.Series(dtype=float)), errors="coerce").dropna()
+    price = _finite(close.iloc[-1]) if len(close) else _finite(fallback_price)
+
+    components = []
+
+    def add(name, weight, value, detail, bullish=True):
+        if value is None or not np.isfinite(value):
+            return
+        value = max(0.0, min(1.0, float(value)))
+        emoji = "🟢" if value >= 0.67 else "🟡" if value >= 0.34 else "🔴"
+        components.append({"name": name, "weight": float(weight), "value": value, "emoji": emoji, "detail": detail})
+
+    def val(col):
+        return _finite(last.get(col))
+
+    ma20, ma50, ma200 = val("MA20"), val("MA50"), val("MA200")
+    ma5, ma10 = val("MA5"), val("MA10")
+    rsi, adx, macd, macd_sig, macd_h = val("RSI"), val("ADX"), val("MACD"), val("MACD_SIG"), val("MACD_H")
+    stoch_k, stoch_d = val("STOCH_K"), val("STOCH_D")
+    bb_p = val("BB_P")
+
+    def price_vs_ma_score(ma):
+        if not np.isfinite(price) or not np.isfinite(ma) or ma == 0:
+            return np.nan, "insufficient data"
+        dist = (price / ma - 1) * 100
+        if dist >= 3:
+            sc = 1.0
+        elif dist >= 0:
+            sc = 0.78
+        elif dist >= -2:
+            sc = 0.42
+        else:
+            sc = 0.12
+        return sc, f"Price {dist:+.1f}% vs MA"
+
+    for ma_name, ma_val, wt in [("Price vs MA20", ma20, 12), ("Price vs MA50", ma50, 12), ("Price vs MA200", ma200, 14)]:
+        sc, detail = price_vs_ma_score(ma_val)
+        add(ma_name, wt, sc, detail)
+
+    if np.isfinite(ma50) and np.isfinite(ma200) and ma200 != 0:
+        spread = (ma50 / ma200 - 1) * 100
+        sc = 1.0 if spread >= 2 else 0.75 if spread >= 0 else 0.25 if spread > -2 else 0.0
+        add("MA50 vs MA200", 9, sc, f"MA50 is {spread:+.1f}% vs MA200")
+
+    try:
+        ma20_clean = pd.to_numeric(clean["MA20"], errors="coerce").dropna()
+        if len(ma20_clean) >= 11 and ma20_clean.iloc[-11] != 0:
+            slope = (ma20_clean.iloc[-1] / ma20_clean.iloc[-11] - 1) * 100
+            sc = 1.0 if slope > 1.0 else 0.70 if slope > 0 else 0.30 if slope > -1.0 else 0.05
+            add("MA20 Slope", 7, sc, f"20-day average changed {slope:+.1f}% over ~10 bars")
+    except Exception:
+        pass
+
+    if np.isfinite(macd) and np.isfinite(macd_sig):
+        diff = macd - macd_sig
+        hist_change = np.nan
+        try:
+            mh = pd.to_numeric(clean["MACD_H"], errors="coerce").dropna()
+            if len(mh) >= 2:
+                hist_change = mh.iloc[-1] - mh.iloc[-2]
+        except Exception:
+            pass
+        sc = 0.95 if diff > 0 and (not np.isfinite(hist_change) or hist_change >= 0) else 0.75 if diff > 0 else 0.35 if np.isfinite(hist_change) and hist_change > 0 else 0.08
+        add("MACD Momentum", 14, sc, f"MACD {'above' if diff > 0 else 'below'} signal; histogram {'improving' if np.isfinite(hist_change) and hist_change > 0 else 'not improving'}")
+
+    if np.isfinite(rsi):
+        # RSI is not automatically bullish when oversold; oversold is a bounce setup but weak trend confirmation.
+        if 50 <= rsi <= 65:
+            sc, note = 1.0, "healthy bullish momentum"
+        elif 45 <= rsi < 50 or 65 < rsi <= 70:
+            sc, note = 0.72, "constructive but not ideal"
+        elif 35 <= rsi < 45 or 70 < rsi <= 78:
+            sc, note = 0.42, "mixed / stretched"
+        else:
+            sc, note = 0.18, "extreme oversold or overbought"
+        add("RSI Regime", 10, sc, f"RSI {rsi:.1f} — {note}")
+
+    if np.isfinite(stoch_k):
+        if 20 <= stoch_k <= 80:
+            sc = 0.60
+        elif stoch_k < 20:
+            sc = 0.35
+        else:
+            sc = 0.30
+        if np.isfinite(stoch_d):
+            sc += 0.20 if stoch_k > stoch_d else -0.10
+        add("Stochastic", 6, sc, f"%K {stoch_k:.1f}" + (f" vs %D {stoch_d:.1f}" if np.isfinite(stoch_d) else ""))
+
+    if np.isfinite(adx):
+        bullish_trend = (np.isfinite(ma20) and np.isfinite(ma50) and price > ma20 >= ma50) or (np.isfinite(ma50) and price > ma50)
+        bearish_trend = (np.isfinite(ma20) and np.isfinite(ma50) and price < ma20 <= ma50) or (np.isfinite(ma50) and price < ma50)
+        if adx >= 25 and bullish_trend:
+            sc, note = 1.0, "strong trend confirms bullish direction"
+        elif adx >= 25 and bearish_trend:
+            sc, note = 0.05, "strong trend confirms bearish direction"
+        elif adx >= 20:
+            sc, note = 0.50, "trend exists but direction is mixed"
+        else:
+            sc, note = 0.45, "weak/ranging trend"
+        add("ADX Trend Strength", 8, sc, f"ADX {adx:.1f} — {note}")
+
+    try:
+        vol = pd.to_numeric(clean["Volume"], errors="coerce")
+        vol_ma = pd.to_numeric(clean["VOL_MA"], errors="coerce")
+        ret = pd.to_numeric(clean["RET"], errors="coerce")
+        if np.isfinite(vol.iloc[-1]) and np.isfinite(vol_ma.iloc[-1]) and vol_ma.iloc[-1] > 0 and np.isfinite(ret.iloc[-1]):
+            vr = vol.iloc[-1] / vol_ma.iloc[-1]
+            if vr >= 1.15 and ret.iloc[-1] > 0:
+                sc, note = 1.0, "up move confirmed by above-average volume"
+            elif vr >= 1.15 and ret.iloc[-1] < 0:
+                sc, note = 0.05, "selling pressure on above-average volume"
+            else:
+                sc, note = 0.50, "no strong volume confirmation"
+            add("Volume Confirmation", 5, sc, f"Volume {vr:.2f}× 20-day average — {note}")
+    except Exception:
+        pass
+
+    if np.isfinite(bb_p):
+        if 0.20 <= bb_p <= 0.80:
+            sc, note = 0.62, "inside normal Bollinger range"
+        elif bb_p > 0.80:
+            sc, note = 0.55, "near upper band; trend can continue but risk is stretched"
+        else:
+            sc, note = 0.32, "near lower band; weak unless reversal confirms"
+        add("Bollinger Position", 3, sc, f"%B {bb_p:.2f} — {note}")
+
+    total_w = sum(c["weight"] for c in components)
+    score = sum(c["weight"] * c["value"] for c in components) / total_w * 100 if total_w else 50.0
+    label, color = _score_color_label(score)
+    return {"score": round(score, 1), "label": label, "color": color, "components": components, "usable_weight": total_w}
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -527,6 +1072,14 @@ def calc_risk(hist, spy):
     beta = float(np.cov(r, b, ddof=1)[0, 1] / np.var(b, ddof=1)) if len(r) > 2 and np.var(b, ddof=1) else 0.0
     mu_r = float(np.mean(r)) * 252 if len(r) else 0.0
     mu_b = float(np.mean(b)) * 252 if len(b) else 0.0
+    # Use realized trailing return for the "1yr Return" metric, not annualized mean daily return.
+    close_px = pd.to_numeric(hist["Close"], errors="coerce").dropna()
+    if len(close_px) >= 253 and close_px.iloc[-253] != 0:
+        ret1y_realized = (close_px.iloc[-1] / close_px.iloc[-253] - 1) * 100
+    elif len(close_px) >= 2 and close_px.iloc[0] != 0:
+        ret1y_realized = (close_px.iloc[-1] / close_px.iloc[0] - 1) * 100
+    else:
+        ret1y_realized = 0.0
     alpha = mu_r - (rf * 252 + beta * (mu_b - rf * 252))
     vol = std_r * np.sqrt(252) * 100
     sharpe = float(np.mean(r - rf) / std_r * np.sqrt(252)) if std_r else 0.0
@@ -553,7 +1106,7 @@ def calc_risk(hist, spy):
     roll_sh = (ret_s.rolling(60, min_periods=30).mean() / ret_s.rolling(60, min_periods=30).std()) * np.sqrt(252)
     return dict(
         beta=round(beta, 3), alpha=round(alpha * 100, 3), vol=round(vol, 2),
-        ret1y=round(mu_r * 100, 2), sharpe=round(sharpe, 3), sortino=round(sortino, 3),
+        ret1y=round(ret1y_realized, 2), sharpe=round(sharpe, 3), sortino=round(sortino, 3),
         calmar=round(calmar, 3), max_dd=round(max_dd, 2), var95=round(var95, 2),
         cvar95=round(cvar95, 2), win=round(win, 1), r2=round(r2, 3),
         te=round(te, 2), ir=round(ir, 3),
@@ -587,91 +1140,308 @@ def safe_float(v, default=0.0):
 def clamp(v, lo=0, hi=100):
     return max(lo, min(hi, int(round(v))))
 
-def score_from_metrics(info, risk, hist_ta=None):
+AI_RISK_MODELS = {
+    "Risk Lover / Growth Momentum": "risk_loving",
+    "Risk Neutral / Balanced": "risk_neutral",
+    "Safe / Quality Defensive": "safe",
+}
+AI_RISK_MODEL_NAMES = {v: k for k, v in AI_RISK_MODELS.items()}
+
+def get_ai_risk_model():
+    return st.session_state.get("ai_risk_model", "risk_loving")
+
+def set_ai_risk_model(value):
+    if value in AI_RISK_MODEL_NAMES:
+        st.session_state["ai_risk_model"] = value
+    elif value in AI_RISK_MODELS:
+        st.session_state["ai_risk_model"] = AI_RISK_MODELS[value]
+    else:
+        st.session_state["ai_risk_model"] = "risk_loving"
+
+def _sync_ai_model_from_widget(widget_key):
+    """Keep every AI-model selector tied to one shared session-state value."""
+    chosen = st.session_state.get(widget_key, "Risk Lover / Growth Momentum")
+    set_ai_risk_model(chosen)
+
+
+def render_ai_model_selector(label="AI scoring model", key="ai_model_selector"):
+    """Render a smooth shared model selector.
+
+    Streamlit still reruns after a widget click, but this selector no longer clears
+    cached market/price data. Switching models only recomputes the lightweight
+    score/thesis layer, so the AI Thesis page feels much smoother.
+    """
+    labels = list(AI_RISK_MODELS.keys())
+    current = get_ai_risk_model()
+    current_label = AI_RISK_MODEL_NAMES.get(current, "Risk Lover / Growth Momentum")
+
+    # Keep every visible selector synchronized with the same shared model.
+    st.session_state[key] = current_label
+
+    try:
+        chosen = st.segmented_control(
+            label or "AI scoring model",
+            labels,
+            key=key,
+            label_visibility="collapsed" if not label else "visible",
+            on_change=_sync_ai_model_from_widget,
+            args=(key,),
+        )
+    except Exception:
+        chosen = st.radio(
+            label or "AI scoring model",
+            labels,
+            key=key,
+            horizontal=True,
+            label_visibility="collapsed" if not label else "visible",
+            on_change=_sync_ai_model_from_widget,
+            args=(key,),
+        )
+
+    set_ai_risk_model(chosen)
+    return get_ai_risk_model()
+
+def ai_model_description(model=None):
+    model = model or get_ai_risk_model()
+    if model == "safe":
+        return "Safe model: quality, valuation, and downside protection have the highest weight; growth still matters, but risky momentum is penalized harder."
+    if model == "risk_neutral":
+        return "Risk-neutral model: balanced weight across growth, momentum, quality, valuation, and safety."
+    return "Risk-lover model: growth and momentum dominate; quality and valuation are secondary filters; safety mainly blocks extreme downside risk."
+
+def score_from_metrics(info, risk, hist_ta=None, model=None):
+    """Growth/momentum-first scoring model for a higher-risk investor.
+
+    Priority order:
+    1) Growth and momentum: strongest drivers of the total score.
+    2) Quality and valuation: still required so weak/speculative names do not pass easily.
+    3) Safety/downside risk: lower weight, but extreme drawdown/volatility can still block a Buy.
+
+    This is not financial advice; it is a rules-based dashboard model.
+    """
+    model = model or get_ai_risk_model()
+    if model not in {"risk_loving", "risk_neutral", "safe"}:
+        model = "risk_loving"
     pe = safe_float(info.get("trailingPE"), 0)
     fpe = safe_float(info.get("forwardPE"), pe)
     ps = safe_float(info.get("priceToSalesTrailing12Months"), 0)
+    peg = safe_float(info.get("pegRatio"), 0)
     rev_g = safe_float(info.get("revenueGrowth"), 0) * 100
+    earn_g = safe_float(info.get("earningsGrowth"), 0) * 100
     margin = safe_float(info.get("profitMargins"), 0) * 100
+    op_margin = safe_float(info.get("operatingMargins"), 0) * 100
+    gross_margin = safe_float(info.get("grossMargins"), 0) * 100
     roe = safe_float(info.get("returnOnEquity"), 0) * 100
+    roa = safe_float(info.get("returnOnAssets"), 0) * 100
     debt_eq = safe_float(info.get("debtToEquity"), 0) / 100
+    current_ratio = safe_float(info.get("currentRatio"), 0)
     beta = safe_float(risk.get("beta"), 1)
     sharpe = safe_float(risk.get("sharpe"), 0)
+    sortino = safe_float(risk.get("sortino"), 0)
     vol = safe_float(risk.get("vol"), 30)
     max_dd = abs(safe_float(risk.get("max_dd"), 25))
+    var95 = abs(safe_float(risk.get("var95"), 2.5))
+    cvar95 = abs(safe_float(risk.get("cvar95"), 4.0))
+    win = safe_float(risk.get("win"), 50)
 
-    valuation = 55
-    valuation += 18 if pe and pe < 18 else 8 if pe and pe < 28 else -10 if pe and pe > 45 else 0
-    valuation += 6 if fpe and pe and fpe < pe else 0
-    valuation += -8 if ps and ps > 10 else 5 if ps and ps < 4 else 0
+    # Valuation is more tolerant for high-growth stocks, but not ignored.
+    valuation = 48
+    if pe > 0:
+        valuation += 15 if pe < 18 else 9 if pe < 28 else 2 if pe < 45 else -7 if pe < 70 else -16
+    else:
+        valuation -= 4
+    if fpe > 0 and pe > 0:
+        valuation += 9 if fpe < pe * 0.80 else 5 if fpe < pe else -3 if fpe > pe * 1.25 else 0
+    if ps > 0:
+        valuation += 9 if ps < 4 else 3 if ps < 10 else -5 if ps < 18 else -12
+    if peg > 0:
+        valuation += 12 if peg < 1.3 else 5 if peg < 2.2 else -6 if peg > 3.5 else 0
+    if rev_g > 25 and margin > 8:
+        valuation += 8
+    elif rev_g > 15:
+        valuation += 4
 
-    quality = 45 + min(max(margin, -10), 35) * 0.8 + min(max(roe, 0), 40) * 0.45
-    quality += 5 if debt_eq < 0.6 else -10 if debt_eq > 2 else 0
-    growth = 50 + min(max(rev_g, -20), 40) * 0.9
+    # Quality is second-tier priority, but negative margins/debt still matter.
+    quality = 42
+    quality += min(max(margin, -12), 32) * 0.62
+    quality += min(max(op_margin, -12), 35) * 0.28
+    quality += min(max(gross_margin, 0), 75) * 0.10
+    quality += min(max(roe, 0), 40) * 0.28
+    quality += min(max(roa, 0), 20) * 0.32
+    quality += 5 if debt_eq and debt_eq < 0.8 else 1 if debt_eq < 1.8 else -7 if debt_eq > 3.0 else 0
+    quality += 3 if current_ratio >= 1.3 else -3 if current_ratio and current_ratio < 0.9 else 0
+    if margin < 0 and rev_g < 10:
+        quality -= 8
 
-    momentum = 50
-    if hist_ta is not None and len(hist_ta) > 60:
+    # Growth is the largest score block.
+    growth = 45 + min(max(rev_g, -30), 60) * 0.95
+    if earn_g:
+        growth += min(max(earn_g, -40), 80) * 0.18
+    if rev_g > 20 and margin > 10:
+        growth += 7
+    if rev_g > 35:
+        growth += 6
+    if rev_g < 0:
+        growth -= 10
+
+    # Momentum is heavily rewarded for your higher-risk/growth style.
+    momentum = 45
+    if hist_ta is not None and len(hist_ta) > 30:
         last = hist_ta.iloc[-1]
         price = safe_float(last.get("Close"), 0)
+        ma5 = safe_float(last.get("MA5"), 0)
         ma20 = safe_float(last.get("MA20"), 0)
         ma50 = safe_float(last.get("MA50"), 0)
+        ma120 = safe_float(last.get("MA120"), 0)
         rsi = safe_float(last.get("RSI"), 50)
-        momentum += 10 if ma20 and price > ma20 else 0
-        momentum += 10 if ma50 and price > ma50 else 0
-        momentum += 5 if 45 <= rsi <= 65 else 0
-        momentum += -10 if rsi > 75 else -5 if rsi < 30 else 0
+        ret_20 = 0
+        ret_60 = 0
+        try:
+            closes = hist_ta["Close"].dropna()
+            if len(closes) > 21:
+                ret_20 = (closes.iloc[-1] / closes.iloc[-21] - 1) * 100
+            if len(closes) > 61:
+                ret_60 = (closes.iloc[-1] / closes.iloc[-61] - 1) * 100
+        except Exception:
+            pass
+        momentum += 7 if ma5 and price > ma5 else -3 if ma5 else 0
+        momentum += 10 if ma20 and price > ma20 else -5 if ma20 else 0
+        momentum += 9 if ma50 and price > ma50 else -6 if ma50 else 0
+        momentum += 6 if ma120 and price > ma120 else -4 if ma120 else 0
+        momentum += min(max(ret_20, -15), 25) * 0.35
+        momentum += min(max(ret_60, -25), 45) * 0.22
+        momentum += 7 if 50 <= rsi <= 72 else 2 if 40 <= rsi < 50 else -7 if rsi > 82 else -5 if rsi < 35 else 0
 
-    risk_score = 50 + beta * 8 + max(vol - 25, 0) * 0.6 + max(max_dd - 20, 0) * 0.6 - sharpe * 8
+    # Risk score still blocks extreme cases, but is intentionally lower weight.
+    risk_score = 42
+    risk_score += max(beta - 1.2, 0) * 7
+    risk_score += max(vol - 35, 0) * 0.45
+    risk_score += max(max_dd - 30, 0) * 0.45
+    risk_score += max(var95 - 3.2, 0) * 2.8
+    risk_score += max(cvar95 - 5.0, 0) * 1.8
+    risk_score -= max(sharpe, 0) * 5
+    risk_score -= max(sortino, 0) * 3
+    risk_score -= max(win - 50, 0) * 0.12
     safety = 100 - risk_score
-    overall = 0.24 * valuation + 0.24 * quality + 0.18 * growth + 0.18 * momentum + 0.16 * safety
-    return {
+
+    # Build the component score dictionary BEFORE any weighted model calculation.
+    # This fixes the NameError from using scores inside _weighted_score before scores existed.
+    scores = {
         "valuation_score": clamp(valuation),
         "quality_score": clamp(quality),
         "growth_score": clamp(growth),
         "momentum_score": clamp(momentum),
         "risk_score": clamp(risk_score),
-        "overall_score": clamp(overall),
+        "safety_score": clamp(safety),
     }
 
-def built_in_ai_thesis(ticker, info, risk, hist_ta=None):
-    scores = score_from_metrics(info, risk, hist_ta)
+    # Model-specific weights and gates.
+    # Risk-lover: growth/momentum first. Risk-neutral: balanced. Safe: quality and downside protection first.
+    def _weighted_score(w):
+        return clamp(
+            w["growth"] * scores["growth_score"]
+            + w["momentum"] * scores["momentum_score"]
+            + w["quality"] * scores["quality_score"]
+            + w["valuation"] * scores["valuation_score"]
+            + w["safety"] * scores["safety_score"]
+        )
+
+    if model == "safe":
+        weights = {"growth": 0.16, "momentum": 0.12, "quality": 0.26, "valuation": 0.20, "safety": 0.26}
+        scores["overall_score"] = _weighted_score(weights)
+        buy_gate = (scores["overall_score"] >= 72 and scores["quality_score"] >= 62 and scores["valuation_score"] >= 50 and scores["growth_score"] >= 45 and scores["risk_score"] <= 58 and max_dd <= 38 and vol <= 55 and var95 <= 4.2 and (sharpe >= 0.25 or sortino >= 0.35))
+        strong_buy_gate = (scores["overall_score"] >= 82 and scores["quality_score"] >= 72 and scores["valuation_score"] >= 58 and scores["risk_score"] <= 48 and max_dd <= 30 and vol <= 45 and (sharpe >= 0.55 or sortino >= 0.70))
+        sell_gate = (scores["overall_score"] < 42 or scores["quality_score"] < 32 or scores["risk_score"] > 82 or max_dd > 65)
+    elif model == "risk_neutral":
+        weights = {"growth": 0.24, "momentum": 0.20, "quality": 0.22, "valuation": 0.18, "safety": 0.16}
+        scores["overall_score"] = _weighted_score(weights)
+        buy_gate = (scores["overall_score"] >= 70 and scores["growth_score"] >= 52 and scores["momentum_score"] >= 50 and scores["quality_score"] >= 50 and scores["valuation_score"] >= 42 and scores["risk_score"] <= 70 and max_dd <= 50 and vol <= 75 and (sharpe >= 0.05 or sortino >= 0.15))
+        strong_buy_gate = (scores["overall_score"] >= 80 and scores["growth_score"] >= 62 and scores["momentum_score"] >= 58 and scores["quality_score"] >= 60 and scores["valuation_score"] >= 48 and scores["risk_score"] <= 60 and max_dd <= 42 and (sharpe >= 0.35 or sortino >= 0.45))
+        sell_gate = (scores["overall_score"] < 40 or (scores["growth_score"] < 35 and scores["momentum_score"] < 35) or (scores["quality_score"] < 30 and scores["valuation_score"] < 32) or scores["risk_score"] > 88)
+    else:
+        weights = {"growth": 0.32, "momentum": 0.28, "quality": 0.18, "valuation": 0.14, "safety": 0.08}
+        scores["overall_score"] = _weighted_score(weights)
+        buy_gate = (scores["overall_score"] >= 70 and scores["growth_score"] >= 58 and scores["momentum_score"] >= 58 and scores["quality_score"] >= 43 and scores["valuation_score"] >= 35 and scores["risk_score"] <= 82 and max_dd <= 60 and vol <= 95 and (sharpe >= -0.10 or sortino >= -0.10))
+        strong_buy_gate = (scores["overall_score"] >= 80 and scores["growth_score"] >= 68 and scores["momentum_score"] >= 66 and scores["quality_score"] >= 52 and scores["valuation_score"] >= 40 and scores["risk_score"] <= 72 and max_dd <= 50 and (sharpe >= 0.20 or sortino >= 0.30))
+        sell_gate = (scores["overall_score"] < 38 or (scores["growth_score"] < 35 and scores["momentum_score"] < 38) or (scores["quality_score"] < 28 and scores["valuation_score"] < 30) or (scores["risk_score"] > 92 and scores["momentum_score"] < 50))
+
+    scores["model"] = model
+    scores["model_name"] = AI_RISK_MODEL_NAMES.get(model, "Risk Lover / Growth Momentum")
+    scores["safety_score"] = clamp(safety)
+    if strong_buy_gate:
+        rec = "Strong Buy"
+    elif buy_gate:
+        rec = "Buy"
+    elif sell_gate:
+        rec = "Sell"
+    else:
+        rec = "Hold"
+    scores["recommendation_model"] = rec
+    return scores
+
+
+def built_in_ai_thesis(ticker, info, risk, hist_ta=None, model=None):
+    model = model or get_ai_risk_model()
+    scores = score_from_metrics(info, risk, hist_ta, model=model)
     overall = scores["overall_score"]
-    rec = "Buy" if overall >= 68 else "Hold" if overall >= 45 else "Sell"
-    confidence = clamp(50 + abs(overall - 50) * 0.8)
+    rec = scores.get("recommendation_model", "Hold")
+    confidence = clamp(52 + abs(overall - 50) * 0.75)
     price = safe_float(info.get("currentPrice") or info.get("regularMarketPrice"), 0)
-    upside = (overall - 55) * 0.9
+
+    growth_adj = (scores["growth_score"] - 55) * 0.34
+    momentum_adj = (scores["momentum_score"] - 55) * 0.30
+    quality_adj = (scores["quality_score"] - 50) * 0.16
+    valuation_adj = (scores["valuation_score"] - 45) * 0.12
+    risk_penalty = max(scores["risk_score"] - 65, 0) * 0.12
+    upside = growth_adj + momentum_adj + quality_adj + valuation_adj - risk_penalty
+    if rec == "Strong Buy":
+        upside += 8
+    elif rec == "Buy":
+        upside += 4
+    elif rec == "Sell":
+        upside -= 10
     target = price * (1 + upside / 100) if price else 0
+
     sector = info.get("sector", "the market") or "the market"
     industry = info.get("industry", "its industry") or "its industry"
-    pe = info.get("trailingPE", "N/A")
     rev_g = safe_float(info.get("revenueGrowth"), 0) * 100
     margin = safe_float(info.get("profitMargins"), 0) * 100
     beta = safe_float(risk.get("beta"), 1)
     sharpe = safe_float(risk.get("sharpe"), 0)
+    sortino = safe_float(risk.get("sortino"), 0)
     vol = safe_float(risk.get("vol"), 0)
-    style = "Quality Growth" if scores["quality_score"] >= 65 and scores["growth_score"] >= 60 else "Value / Stability" if scores["valuation_score"] >= 65 else "Cyclical / Momentum" if scores["momentum_score"] >= 65 else "Balanced"
-    moat = "Wide" if scores["quality_score"] >= 72 else "Moderate" if scores["quality_score"] >= 55 else "Unclear"
+    max_dd = abs(safe_float(risk.get("max_dd"), 0))
 
-    bull = f"{ticker} screens best where its quality, growth, and momentum scores are strongest. Revenue growth is about {rev_g:.1f}% and net margin is about {margin:.1f}%, which gives a quick view of operating strength. If the company keeps converting growth into earnings and the trend remains above key moving averages, the stock has room to outperform peers in {industry}."
-    bear = f"The main weakness is risk and valuation discipline. Beta is about {beta:.2f}, annualized volatility is about {vol:.1f}%, and Sharpe is about {sharpe:.2f}. If earnings expectations fall, valuation multiples such as P/E ({pe}) can compress quickly."
-    summary = f"Built-in thesis: {ticker} is rated {rec} with an overall score of {overall}/100. The view is based on valuation, profitability, growth, momentum, and risk metrics from the dashboard, not an external paid API."
+    style = (
+        "Aggressive Growth Leader" if scores["growth_score"] >= 72 and scores["momentum_score"] >= 68 else
+        "Growth Momentum" if scores["growth_score"] >= 62 and scores["momentum_score"] >= 60 else
+        "Quality Growth" if scores["quality_score"] >= 65 and scores["growth_score"] >= 58 else
+        "Value / Recovery" if scores["valuation_score"] >= 65 and scores["momentum_score"] >= 52 else
+        "Balanced / Watchlist"
+    )
+    moat = "Wide" if scores["quality_score"] >= 75 else "Moderate" if scores["quality_score"] >= 60 else "Unclear"
+
+    bull = f"{ticker} is scored with a growth-and-momentum-first profile. Revenue growth is about {rev_g:.1f}% and net margin is about {margin:.1f}%, while the model strongly rewards stocks trading above key moving averages with improving recent performance. A Buy rating can tolerate higher volatility, but still requires minimum quality, valuation discipline, and no extreme downside-risk profile."
+    bear = f"The key risks are valuation compression, failed momentum, and large drawdowns. Beta is about {beta:.2f}, annualized volatility is about {vol:.1f}%, max drawdown is about {max_dd:.1f}%, Sharpe is {sharpe:.2f}, and Sortino is {sortino:.2f}. If growth slows or the stock loses trend strength, the model will usually downgrade even if the long-term story remains attractive."
+    summary = f"Built-in thesis: {ticker} is rated {rec} with an overall score of {overall}/100. {ai_model_description(model)}"
 
     return {
         "recommendation": rec, "confidence": confidence, "price_target": round(target, 2),
         "upside_pct": round(upside, 1), "style": style, "horizon": "6-12 months",
         "overall_score": overall, **scores, "moat": moat,
-        "moat_desc": f"Moat assessment is inferred from margins, ROE, balance sheet strength, and industry position within {sector}.",
+        "moat_desc": f"Moat assessment is inferred from margins, ROE/ROA, balance-sheet strength, and industry position within {sector}.",
         "bull": bull, "bear": bear, "summary": summary,
-        "catalysts": ["Earnings beats and higher guidance", "Improving margins or free cash flow", "Sustained strength above moving averages", "Sector rotation into " + sector],
-        "risks": ["Multiple compression", "Revenue growth slowdown", "High volatility or market beta", "Technical breakdown below support"],
-        "esg_score": clamp(55 + scores["quality_score"] * 0.25),
+        "catalysts": ["Revenue acceleration or higher guidance", "Breakout above major moving averages", "Earnings beats with improving margin trend", "Sector rotation into high-growth momentum names"],
+        "risks": ["Growth slowdown", "Momentum reversal below key moving averages", "Multiple compression", "Extreme volatility or large drawdown"],
+        "esg_score": clamp(52 + scores["quality_score"] * 0.28),
         "esg_notes": "ESG is not deeply modeled here; this score is a conservative placeholder inferred from company stability and quality metrics.",
         "insider": "Neutral", "peers": [],
     }
 
 def comparison_paragraph(t1, info1, risk1, ta1, t2, info2, risk2, ta2):
-    s1 = score_from_metrics(info1, risk1, ta1)
-    s2 = score_from_metrics(info2, risk2, ta2)
+    model = get_ai_risk_model()
+    s1 = score_from_metrics(info1, risk1, ta1, model=model)
+    s2 = score_from_metrics(info2, risk2, ta2, model=model)
     n1 = info1.get("longName", t1)
     n2 = info2.get("longName", t2)
     p1 = safe_float(info1.get("trailingPE"), 0)
@@ -688,6 +1458,131 @@ def comparison_paragraph(t1, info1, risk1, ta1, t2, info2, risk2, ta2):
     )
 
 
+
+
+
+# ══════════════════════════════════════════════════════════════════
+#  BOND / OPTION CALCULATORS
+# ══════════════════════════════════════════════════════════════════
+def bond_price(face, coupon_rate, ytm, years, freq=2):
+    try:
+        n = int(round(years * freq))
+        if n <= 0 or face <= 0 or freq <= 0:
+            return 0.0
+        c = face * coupon_rate / freq
+        r = ytm / freq
+        if abs(r) < 1e-12:
+            return c * n + face
+        return sum(c / ((1 + r) ** t) for t in range(1, n + 1)) + face / ((1 + r) ** n)
+    except Exception:
+        return 0.0
+
+
+def bond_duration_convexity(face, coupon_rate, ytm, years, freq=2):
+    n = int(round(years * freq))
+    c = face * coupon_rate / freq
+    r = ytm / freq
+    times = np.array([(i / freq) for i in range(1, n + 1)], dtype=float)
+    cashflows = np.array([c] * n, dtype=float)
+    if n > 0:
+        cashflows[-1] += face
+    discounts = np.array([(1 + r) ** i for i in range(1, n + 1)], dtype=float)
+    pv = cashflows / discounts
+    price = float(pv.sum()) if len(pv) else 0.0
+    if price <= 0:
+        return 0.0, 0.0, 0.0
+    macaulay = float((times * pv).sum() / price)
+    modified = macaulay / (1 + r)
+    convexity = float(np.sum(pv * times * (times + 1 / freq)) / (price * (1 + r) ** 2))
+    return macaulay, modified, convexity
+
+
+def bond_cashflow_table(face, coupon_rate, ytm, years, freq=2):
+    n = int(round(years * freq))
+    c = face * coupon_rate / freq
+    r = ytm / freq
+    rows = []
+    for i in range(1, n + 1):
+        cf = c + (face if i == n else 0)
+        pv = cf / ((1 + r) ** i) if (1 + r) else 0
+        rows.append({"Period": i, "Year": round(i / freq, 2), "Cash Flow": round(cf, 2), "Present Value": round(pv, 2)})
+    return pd.DataFrame(rows)
+
+
+def bond_price_sensitivity_chart(face, coupon_rate, ytm, years, freq=2):
+    shocks = np.arange(-2.0, 2.01, 0.25)
+    prices = [bond_price(face, coupon_rate, max(ytm + s / 100, -0.99), years, freq) for s in shocks]
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=shocks, y=prices, mode="lines+markers", line=dict(color=BLUE, width=2), name="Bond Price"))
+    fig.add_vline(x=0, line_width=1, line_dash="dash", line_color="#64748b")
+    fig.update_layout(**base_layout(height=310))
+    fig.update_layout(
+        xaxis_title="Yield Shock (percentage points)",
+        yaxis_title="Estimated Price",
+        yaxis=dict(tickprefix="$", showgrid=True, gridcolor=GRID_COL, side="right"),
+        xaxis=dict(ticksuffix="%", showgrid=False),
+        margin=dict(l=20, r=70, t=20, b=45),
+    )
+    return fig
+
+
+def _norm_cdf(x):
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def _norm_pdf(x):
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def black_scholes(S, K, T, r, sigma, option_type="Call", q=0.0):
+    if S <= 0 or K <= 0 or T <= 0 or sigma <= 0:
+        intrinsic = max(S - K, 0) if option_type == "Call" else max(K - S, 0)
+        return {"price": intrinsic, "delta": 0, "gamma": 0, "theta": 0, "vega": 0, "rho": 0, "d1": 0, "d2": 0, "intrinsic": intrinsic, "time_value": 0}
+    d1 = (math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    if option_type == "Call":
+        price = S * math.exp(-q * T) * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
+        delta = math.exp(-q * T) * _norm_cdf(d1)
+        theta = (-(S * math.exp(-q*T) * _norm_pdf(d1) * sigma) / (2 * math.sqrt(T))
+                 - r * K * math.exp(-r*T) * _norm_cdf(d2) + q * S * math.exp(-q*T) * _norm_cdf(d1)) / 365
+        rho = K * T * math.exp(-r*T) * _norm_cdf(d2) / 100
+        intrinsic = max(S - K, 0)
+    else:
+        price = K * math.exp(-r * T) * _norm_cdf(-d2) - S * math.exp(-q * T) * _norm_cdf(-d1)
+        delta = -math.exp(-q * T) * _norm_cdf(-d1)
+        theta = (-(S * math.exp(-q*T) * _norm_pdf(d1) * sigma) / (2 * math.sqrt(T))
+                 + r * K * math.exp(-r*T) * _norm_cdf(-d2) - q * S * math.exp(-q*T) * _norm_cdf(-d1)) / 365
+        rho = -K * T * math.exp(-r*T) * _norm_cdf(-d2) / 100
+        intrinsic = max(K - S, 0)
+    gamma = math.exp(-q*T) * _norm_pdf(d1) / (S * sigma * math.sqrt(T))
+    vega = S * math.exp(-q*T) * _norm_pdf(d1) * math.sqrt(T) / 100
+    return {"price": price, "delta": delta, "gamma": gamma, "theta": theta, "vega": vega, "rho": rho, "d1": d1, "d2": d2, "intrinsic": intrinsic, "time_value": max(price - intrinsic, 0)}
+
+
+def option_payoff_chart(S, K, premium, option_type="Call"):
+    lo = max(0.01, S * 0.5)
+    hi = S * 1.5
+    xs = np.linspace(lo, hi, 180)
+    if option_type == "Call":
+        payoff = np.maximum(xs - K, 0) - premium
+        breakeven = K + premium
+    else:
+        payoff = np.maximum(K - xs, 0) - premium
+        breakeven = K - premium
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=xs, y=payoff, mode="lines", line=dict(color=BLUE, width=2), name="Expiration P/L"))
+    fig.add_hline(y=0, line_color="#64748b", line_dash="dash", line_width=1)
+    fig.add_vline(x=S, line_color=AMBER, line_dash="dot", line_width=1)
+    fig.add_vline(x=breakeven, line_color=GREEN, line_dash="dash", line_width=1)
+    fig.update_layout(**base_layout(height=310))
+    fig.update_layout(
+        xaxis_title="Underlying Price at Expiration",
+        yaxis_title="Profit / Loss per Share",
+        yaxis=dict(tickprefix="$", showgrid=True, gridcolor=GRID_COL, side="right"),
+        xaxis=dict(tickprefix="$", showgrid=False),
+        margin=dict(l=20, r=70, t=20, b=45),
+    )
+    return fig
 
 def clean_text(x):
     if x is None:
@@ -734,32 +1629,133 @@ def _extract_yf_news_item(item, ticker):
 
 
 def sentiment_and_impact(title, summary, ticker=""):
+    """Score news by likely stock-price relevance.
+
+    Importance is intentionally event-driven: financial reports, earnings,
+    guidance, regulation/policy, rates/Fed, litigation, M&A, analyst actions,
+    capital returns, credit/debt, and major macro shocks are weighted much more
+    heavily than generic market commentary.
+    """
     text = f"{title} {summary}".lower()
-    pos_words = {"beat": 10, "beats": 10, "raises": 10, "raised": 8, "upgrade": 9, "upgraded": 9, "buy rating": 8, "strong demand": 8, "record": 7, "profit": 5, "growth": 5, "partnership": 5, "contract": 6, "launch": 4, "outperform": 8, "higher target": 8, "surge": 6, "rally": 5, "approval": 7, "expands": 5}
-    neg_words = {"miss": -10, "misses": -10, "cuts": -9, "cut": -6, "downgrade": -9, "downgraded": -9, "sell rating": -8, "lawsuit": -8, "probe": -8, "investigation": -8, "sec": -5, "slump": -6, "drops": -5, "falls": -5, "weak": -5, "slowdown": -7, "guidance cut": -12, "layoff": -5, "loss": -5, "warning": -6, "tariff": -4, "concern": -4, "risk": -3, "bearish": -6, "underperform": -8}
+
+    # Price-direction words. These drive sentiment/influence, not just importance.
+    pos_words = {
+        "beat": 12, "beats": 12, "beat estimates": 14, "tops estimates": 12,
+        "raises guidance": 16, "raises outlook": 14, "raised guidance": 14,
+        "upgrade": 11, "upgraded": 11, "buy rating": 9, "outperform": 9,
+        "price target raised": 11, "higher target": 9, "strong demand": 9,
+        "record revenue": 8, "record profit": 8, "margin expands": 8,
+        "profit growth": 7, "revenue growth": 7, "free cash flow": 6,
+        "buyback": 7, "dividend increase": 7, "approval": 8,
+        "contract": 7, "partnership": 5, "launch": 4, "surge": 7, "rally": 5,
+    }
+    neg_words = {
+        "miss": -13, "misses": -13, "missed estimates": -15,
+        "cuts guidance": -17, "guidance cut": -17, "lowers outlook": -15,
+        "downgrade": -11, "downgraded": -11, "sell rating": -10, "underperform": -10,
+        "price target cut": -11, "probe": -10, "investigation": -11, "sec investigation": -14,
+        "lawsuit": -10, "class action": -9, "antitrust": -10, "regulatory scrutiny": -9,
+        "warning": -8, "profit warning": -13, "slowdown": -8, "weak demand": -9,
+        "margin pressure": -8, "loss widens": -9, "debt concern": -8,
+        "layoff": -5, "tariff": -6, "sanction": -8, "recall": -8,
+        "slump": -7, "drops": -5, "falls": -5, "bearish": -7,
+    }
+
     score = 0
     hits = []
     for w, v in pos_words.items():
         if w in text:
-            score += v; hits.append(w)
+            score += v
+            hits.append(w)
     for w, v in neg_words.items():
         if w in text:
-            score += v; hits.append(w)
-    importance_terms = ["earnings", "revenue", "guidance", "analyst", "rating", "target", "acquisition", "merger", "lawsuit", "investigation", "fed", "rate", "ai", "cloud", "ceo", "cfo", "sec"]
-    importance = min(100, 25 + min(len(hits) * 9, 35) + sum(6 for term in importance_terms if term in text))
-    if ticker and ticker.lower() in text:
-        importance = min(100, importance + 10)
+            score += v
+            hits.append(w)
+
+    # Event-category importance. These are the items traders usually care about most.
+    critical_categories = {
+        "Earnings / Financial Report": [
+            "earnings", "quarterly results", "q1 results", "q2 results", "q3 results", "q4 results",
+            "financial results", "annual report", "10-k", "10-q", "eps", "profit", "net income",
+            "revenue", "sales", "margin", "free cash flow", "cash flow", "ebitda", "operating income",
+        ],
+        "Guidance / Outlook": [
+            "guidance", "outlook", "forecast", "full-year", "fy", "raises outlook", "lowers outlook",
+            "cuts guidance", "raises guidance", "profit warning", "preliminary results",
+        ],
+        "Policy / Regulation": [
+            "fed", "federal reserve", "interest rate", "rate cut", "rate hike", "inflation", "cpi", "ppi",
+            "policy", "regulation", "regulatory", "antitrust", "tariff", "sanction", "export control",
+            "government", "white house", "congress", "sec", "doj", "ftc", "fda", "approval",
+        ],
+        "Analyst / Rating": [
+            "analyst", "upgrade", "downgrade", "rating", "price target", "initiates coverage",
+            "buy rating", "sell rating", "outperform", "underperform", "overweight", "neutral rating",
+        ],
+        "M&A / Strategic Deal": [
+            "acquisition", "acquires", "merger", "takeover", "buyout", "deal", "joint venture",
+            "partnership", "strategic investment", "stake", "spin off", "spinoff",
+        ],
+        "Legal / Investigation": [
+            "lawsuit", "sued", "class action", "settlement", "probe", "investigation", "fraud",
+            "subpoena", "sec investigation", "doj", "ftc", "antitrust",
+        ],
+        "Capital Return / Balance Sheet": [
+            "dividend", "buyback", "repurchase", "debt", "bond", "credit rating", "downgrade debt",
+            "cash", "liquidity", "bankruptcy", "offering", "share sale", "secondary offering",
+        ],
+        "Product / Demand Shock": [
+            "launch", "order", "contract", "backlog", "shipment", "recall", "supply chain",
+            "demand", "shortage", "ai", "cloud", "chip", "semiconductor",
+        ],
+    }
+
+    category_scores = []
+    for category, terms in critical_categories.items():
+        matches = [term for term in terms if term in text]
+        if matches:
+            category_scores.append((category, min(32, 14 + 4 * len(matches))))
+
+    category = category_scores[0][0] if category_scores else "General Market News"
+    event_score = sum(v for _, v in category_scores)
+
+    # Extra boosts for phrases that are highly material even if sentiment is neutral.
+    high_material_phrases = [
+        "earnings call", "earnings report", "reports earnings", "quarterly earnings",
+        "beats earnings", "misses earnings", "raises guidance", "cuts guidance",
+        "revenue beat", "revenue miss", "sec filing", "10-k", "10-q",
+        "federal reserve", "rate decision", "cpi report", "export controls",
+        "antitrust lawsuit", "class action", "merger agreement", "acquisition offer",
+    ]
+    material_boost = sum(10 for phrase in high_material_phrases if phrase in text)
+
+    # Source and ticker boosts help keep direct company news above broad market filler.
+    source_boost = 0
+    publisher_blob = text
+    if "wall street journal" in publisher_blob or "wsj" in publisher_blob or "yahoo finance" in publisher_blob:
+        source_boost += 4
+    ticker_boost = 12 if ticker and ticker.lower() in text else 0
+
+    importance = 18 + event_score + material_boost + min(len(hits) * 5, 20) + ticker_boost + source_boost
+    importance = max(0, min(100, importance))
+
     if score > 5:
         sent = "Positive"
     elif score < -5:
         sent = "Negative"
     else:
         sent = "Neutral"
-    influence = max(-100, min(100, score * 3 + (importance - 50) * (1 if score > 0 else -1 if score < 0 else 0) * 0.35))
-    return sent, int(round(influence)), int(round(importance))
+
+    # Influence combines direction and materiality. Important neutral news still gets a nonzero watch value.
+    if score != 0:
+        influence = score * 3.2 + (importance - 50) * (1 if score > 0 else -1) * 0.45
+    else:
+        influence = 0 if importance < 65 else 8
+    influence = max(-100, min(100, influence))
+    return sent, int(round(influence)), int(round(importance)), category
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_news_items(ticker, keyword="", refresh_token=0):
     del refresh_token
     items = []
@@ -806,7 +1802,7 @@ def fetch_news_items(ticker, keyword="", refresh_token=0):
                         items.append({"ticker": ticker, "title": title, "summary": summary, "publisher": "WSJ", "link": clean_text(it.findtext("link")), "ts": _news_timestamp(it.findtext("pubDate")), "source_rank": 1})
     except Exception:
         pass
-    kw = keyword.strip().lower()
+    kw = clean_text(keyword or "").strip().lower()
     dedup = {}
     for n in items:
         title = n.get("title", "")
@@ -816,14 +1812,25 @@ def fetch_news_items(ticker, keyword="", refresh_token=0):
         if kw and kw not in f"{title} {summary} {n.get('publisher','')}".lower():
             continue
         key = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()[:90]
-        sent, influence, importance = sentiment_and_impact(title, summary, ticker)
-        n.update({"sentiment": sent, "influence": influence, "importance": importance})
+        sent, influence, importance, category = sentiment_and_impact(title, summary, ticker)
+        n.update({"sentiment": sent, "influence": influence, "importance": importance, "category": category})
         old = dedup.get(key)
         if old is None or (n["source_rank"], -n["ts"], -n["importance"]) < (old["source_rank"], -old["ts"], -old["importance"]):
             dedup[key] = n
     out = list(dedup.values())
-    out.sort(key=lambda x: (x.get("importance", 0), x.get("ts", 0)), reverse=True)
-    return out[:20]
+    # Keep material stock-moving news in front. Earnings/guidance/policy/legal/M&A items
+    # should not be buried by generic recent headlines.
+    out.sort(key=lambda x: (x.get("importance", 0), abs(x.get("influence", 0)), x.get("ts", 0)), reverse=True)
+    important = [x for x in out if x.get("importance", 0) >= 65]
+    newest = sorted(out, key=lambda x: x.get("ts", 0), reverse=True)[:8]
+    merged = []
+    seen = set()
+    for x in important + out[:20] + newest:
+        k = re.sub(r"[^a-z0-9]+", " ", x.get("title", "").lower()).strip()[:90]
+        if k and k not in seen:
+            seen.add(k)
+            merged.append(x)
+    return merged[:24]
 
 
 def render_news_item(n):
@@ -844,6 +1851,7 @@ def render_news_item(n):
       <div class="news-meta">{publisher} · {when}</div>
       <div class="news-title">{title}</div>
       <span class="news-pill {cls}">{sent_display}</span>
+      <span class="news-pill">{html.escape(n.get('category', 'General Market News'))}</span>
       <span class="news-pill">{tr("Influence")} {n.get('influence',0):+d}/100</span>
       <span class="news-pill">{tr("Importance")} {n.get('importance',0)}/100</span>
       <div class="news-summary">{summary if summary else tr('No short summary was provided by the source.')}</div>
@@ -851,6 +1859,345 @@ def render_news_item(n):
     </div>
     '''
     st.markdown(body, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  BROAD MARKET NEWS ENGINE — source-prioritized, AI-style summaries
+# ══════════════════════════════════════════════════════════════════
+MARKET_NEWS_CATEGORIES = [
+    "All Categories", "Policy / Regulation", "Central Bank / Rates", "Geopolitics / Conflict",
+    "Financial Release", "Management Change", "M&A / Strategic Deal", "Commodities / Energy",
+    "Technology / AI", "Banking / Credit", "Healthcare / FDA", "Earnings / Guidance",
+    "Macro Data", "Legal / Investigation", "General Market News",
+]
+MARKET_NEWS_COUNTRIES = ["All Countries", "United States", "Global", "China", "Europe", "Japan", "Middle East", "United Kingdom", "Canada", "Emerging Markets"]
+MARKET_NEWS_INDUSTRIES = [
+    "All Industries", "Energy", "Semiconductors", "Software / Cloud", "Banks", "Financials",
+    "Defense", "Airlines / Travel", "Shipping", "Industrials", "Consumer / Retail",
+    "Autos", "Healthcare", "Biotech", "Utilities", "Real Estate", "Materials", "Crypto",
+]
+MARKET_SOURCE_RANK = {
+    "Yahoo Finance": 1, "WSJ": 1, "Wall Street Journal": 1,
+    "Reuters": 2, "Associated Press": 2, "AP": 2, "CNBC": 2, "Bloomberg": 2, "MarketWatch": 2,
+    "Financial Times": 3, "Barron's": 3, "Investing.com": 4, "Google News": 5,
+}
+
+
+def _market_clean_publisher(title, default="News"):
+    title = clean_text(title)
+    if " - " in title:
+        possible_title, possible_pub = title.rsplit(" - ", 1)
+        return possible_title.strip(), possible_pub.strip() or default
+    return title, default
+
+
+def _market_ai_headline(title):
+    # Concise local AI-style headline without external API dependency.
+    t = clean_text(title)
+    if " - " in t:
+        t = t.rsplit(" - ", 1)[0].strip()
+    replacements = [
+        (r"\bStock Market Today:\s*", ""), (r"\bStocks (rise|fall|open|close|mixed) as\b", "Market moves as"),
+        (r"\bDow Jones Futures:\s*", "Futures:"), (r"\bLive Updates:?\s*", ""),
+        (r"\bWhat to Watch\b", "Market watch"),
+    ]
+    for pat, repl in replacements:
+        t = re.sub(pat, repl, t, flags=re.I)
+    t = re.sub(r"\s+", " ", t).strip(" -|•")
+    words = t.split()
+    if len(words) > 15:
+        t = " ".join(words[:15]).rstrip(",.;:") + "…"
+    return t or "Market update"
+
+
+def _market_detect_country(text):
+    blob = text.lower()
+    rules = [
+        ("Middle East", ["hormuz", "iran", "israel", "middle east", "gulf", "red sea", "opec"]),
+        ("China", ["china", "beijing", "hong kong", "shanghai", "pboc", "yuan", "taiwan"]),
+        ("Europe", ["europe", "eurozone", "ecb", "germany", "france", "italy", "brussels", "eu "]),
+        ("Japan", ["japan", "boj", "tokyo", "yen"]),
+        ("United Kingdom", ["u.k.", "uk ", "britain", "london", "boe"]),
+        ("Canada", ["canada", "bank of canada", "toronto"]),
+        ("Emerging Markets", ["emerging market", "india", "brazil", "mexico", "argentina", "south africa"]),
+        ("United States", ["u.s.", "us ", "america", "fed", "federal reserve", "white house", "congress", "sec", "nasdaq", "s&p", "dow"]),
+    ]
+    for country, kws in rules:
+        if any(k in blob for k in kws):
+            return country
+    return "Global"
+
+
+def _market_category(text):
+    blob = text.lower()
+    category_terms = [
+        ("Geopolitics / Conflict", ["hormuz", "war", "conflict", "strike", "sanction", "missile", "red sea", "iran", "israel", "russia", "ukraine"]),
+        ("Central Bank / Rates", ["federal reserve", "fed ", "rate cut", "rate hike", "interest rate", "treasury yield", "ecb", "boj", "inflation"]),
+        ("Policy / Regulation", ["tariff", "policy", "regulation", "regulatory", "export control", "white house", "congress", "sec", "doj", "ftc", "fda", "tax"]),
+        ("Financial Release", ["cpi", "ppi", "payroll", "jobs report", "gdp", "retail sales", "ism", "pmi", "financial results", "quarterly results"]),
+        ("Management Change", ["ceo", "cfo", "resigns", "steps down", "appointed", "management change", "board"]),
+        ("Earnings / Guidance", ["earnings", "guidance", "outlook", "profit warning", "eps", "revenue", "margin"]),
+        ("M&A / Strategic Deal", ["merger", "acquisition", "takeover", "buyout", "deal", "stake", "spin off", "spinoff"]),
+        ("Commodities / Energy", ["oil", "brent", "wti", "natural gas", "gold", "copper", "commodity", "opec", "hormuz"]),
+        ("Technology / AI", ["ai", "artificial intelligence", "chip", "semiconductor", "data center", "cloud", "software"]),
+        ("Banking / Credit", ["bank", "credit", "loan", "default", "delinquency", "commercial real estate", "capital requirement"]),
+        ("Healthcare / FDA", ["fda", "drug", "clinical trial", "biotech", "medicare", "healthcare"]),
+        ("Legal / Investigation", ["lawsuit", "investigation", "probe", "settlement", "antitrust", "fraud"]),
+        ("Macro Data", ["inflation", "gdp", "jobs", "payroll", "consumer confidence", "manufacturing", "services"]),
+    ]
+    for cat, kws in category_terms:
+        if any(k in blob for k in kws):
+            return cat
+    return "General Market News"
+
+
+def _market_impact_analysis(title, summary):
+    text = f"{title} {summary}".lower()
+    good, bad, watch, companies = [], [], [], []
+    def add_good(item):
+        if item not in good: good.append(item)
+    def add_bad(item):
+        if item not in bad: bad.append(item)
+    def add_watch(item):
+        if item not in watch: watch.append(item)
+
+    if any(k in text for k in ["hormuz", "iran", "middle east", "red sea", "opec", "oil shock"]):
+        add_good("Energy producers, oil services, defense")
+        add_bad("Airlines, travel, shipping, consumer discretionary")
+        add_watch("Inflation-sensitive growth stocks, broad indexes")
+        companies += ["XOM", "CVX", "COP", "SLB", "RTX", "LMT", "DAL", "UAL", "AAL"]
+    if any(k in text for k in ["rate cut", "lower rates", "dovish", "yields fall"]):
+        add_good("Software/cloud, semiconductors, real estate, small caps")
+        add_bad("Banks with net-interest-margin pressure")
+        add_watch("Long-duration growth valuation multiples")
+        companies += ["NVDA", "MSFT", "CRM", "PLD", "JPM", "BAC"]
+    if any(k in text for k in ["rate hike", "higher rates", "hawkish", "yields rise", "hot inflation"]):
+        add_good("Banks, cash-rich defensive firms")
+        add_bad("High-multiple growth, real estate, utilities")
+        add_watch("Dollar, Treasury yields, financing costs")
+        companies += ["JPM", "BAC", "NVDA", "TSLA", "PLD", "NEE"]
+    if any(k in text for k in ["tariff", "export control", "sanction", "trade restriction"]):
+        add_good("Domestic substitutes, selected defense/security")
+        add_bad("Semiconductors, global hardware supply chains, China ADRs, retailers")
+        add_watch("Margin pressure and retaliation risk")
+        companies += ["NVDA", "AMD", "AAPL", "TSM", "BABA", "PDD", "WMT"]
+    if any(k in text for k in ["ai", "artificial intelligence", "data center", "chip", "semiconductor"]):
+        add_good("Semiconductors, cloud infrastructure, power equipment")
+        add_bad("Legacy software without AI monetization")
+        add_watch("Capex sustainability and valuation risk")
+        companies += ["NVDA", "AMD", "AVGO", "MSFT", "GOOGL", "AMZN", "ORCL"]
+    if any(k in text for k in ["fda", "clinical trial", "drug approval", "medicare"]):
+        add_good("Biotech/healthcare winners named in headline")
+        add_bad("Competitors with weaker pipelines or pricing pressure")
+        add_watch("Binary trial/FDA risk")
+        companies += ["LLY", "NVO", "MRK", "PFE", "JNJ"]
+    if any(k in text for k in ["bank", "credit", "default", "delinquency", "commercial real estate"]):
+        add_good("Large diversified banks if credit stress is contained")
+        add_bad("Regional banks, highly levered real estate")
+        add_watch("Credit spreads and deposit flows")
+        companies += ["JPM", "BAC", "KRE", "SCHW", "PLD"]
+    if any(k in text for k in ["earnings", "guidance", "revenue", "margin", "profit"]):
+        add_good("Companies beating guidance with margin expansion")
+        add_bad("Companies cutting outlook or showing demand weakness")
+        add_watch("Sector read-through from earnings commentary")
+    if any(k in text for k in ["ceo", "cfo", "resigns", "steps down", "appointed"]):
+        add_good("Turnaround stories if leadership improves execution")
+        add_bad("Companies with unexpected executive exits")
+        add_watch("Management credibility and strategy reset")
+    if any(k in text for k in ["merger", "acquisition", "takeover", "buyout"]):
+        add_good("Target company, investment banks, strategic consolidators")
+        add_bad("Acquirer if price/leverage is excessive")
+        add_watch("Regulatory approval risk")
+    if not good: add_good("Possible winners depend on the named sector/company")
+    if not bad: add_bad("Possible losers depend on valuation, exposure, and expectations")
+    if not watch: add_watch("Watch price reaction, volume, yields, FX, and sector breadth")
+    return {"good_for": good[:4], "bad_for": bad[:4], "watch": watch[:4], "companies": sorted(set([c for c in companies if c]))[:14]}
+
+
+def _market_score_and_sentiment(title, summary, publisher=""):
+    text = f"{title} {summary}".lower()
+    importance = 24
+    high = ["hormuz", "federal reserve", "rate decision", "cpi", "jobs report", "tariff", "export control", "war", "oil", "earnings", "guidance", "merger", "acquisition", "ceo", "fda", "bank", "credit"]
+    med = ["inflation", "yields", "revenue", "profit", "margin", "ai", "chips", "semiconductor", "lawsuit", "probe", "policy", "regulation", "global", "china", "europe"]
+    importance += sum(9 for k in high if k in text)
+    importance += sum(4 for k in med if k in text)
+    pub_rank = MARKET_SOURCE_RANK.get(publisher, 4)
+    importance += max(0, 8 - pub_rank * 2)
+    importance = clamp(importance, 0, 100)
+    pos_terms = ["beat", "beats", "surge", "rally", "approval", "deal", "raises", "growth", "record", "cut rates", "dovish"]
+    neg_terms = ["miss", "slump", "falls", "drops", "war", "conflict", "cuts guidance", "tariff", "sanction", "probe", "lawsuit", "hot inflation", "hawkish"]
+    pos = sum(1 for k in pos_terms if k in text)
+    neg = sum(1 for k in neg_terms if k in text)
+    if pos > neg: sentiment = "Positive"
+    elif neg > pos: sentiment = "Negative"
+    else: sentiment = "Mixed / Watch"
+    return importance, sentiment
+
+
+def _market_ai_summary(title, summary, category, impact):
+    base = clean_text(summary) or clean_text(title)
+    if len(base.split()) > 34:
+        base = " ".join(base.split()[:34]).rstrip(",.;:") + "…"
+    good = "; ".join(impact.get("good_for", [])[:2])
+    bad = "; ".join(impact.get("bad_for", [])[:2])
+    return f"{base} Category: {category}. Likely positive for {good}; possible pressure on {bad}."
+
+
+def _market_parse_rss_items(xml_bytes, publisher_default="News", source_rank=5, limit=40):
+    rows = []
+    try:
+        root = ET.fromstring(xml_bytes)
+        for it in root.findall(".//item")[:limit]:
+            title_raw = clean_text(it.findtext("title"))
+            title, publisher = _market_clean_publisher(title_raw, publisher_default)
+            rows.append({"title": title, "summary": clean_text(it.findtext("description")), "link": clean_text(it.findtext("link")), "publisher": publisher or publisher_default, "ts": _news_timestamp(it.findtext("pubDate")), "source_rank": source_rank})
+    except Exception:
+        pass
+    return rows
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_market_news(keyword="", ticker_query="", refresh_token=0):
+    del refresh_token
+    keyword = clean_text(keyword or "").strip()
+    ticker_query = clean_text(ticker_query or "").strip().upper()
+    ticker_company = ""
+    if ticker_query:
+        try:
+            tinfo = yf.Ticker(ticker_query).get_info()
+            ticker_company = clean_text(tinfo.get("shortName") or tinfo.get("longName") or "")
+        except Exception:
+            ticker_company = ""
+    headers = {"User-Agent": "Mozilla/5.0 StockAnalyzerPro/2.0"}
+    items = []
+    market_symbols = ["^GSPC", "^IXIC", "^DJI", "CL=F", "GC=F", "BTC-USD", "XLK", "XLF", "XLE", "SMH"]
+    if ticker_query and ticker_query not in market_symbols:
+        market_symbols.insert(0, ticker_query)
+    for symbol in market_symbols:
+        try:
+            for raw in (yf.Ticker(symbol).news or [])[:12]:
+                n = _extract_yf_news_item(raw, symbol)
+                if n.get("title"):
+                    n["publisher"] = n.get("publisher") or "Yahoo Finance"
+                    n["source_rank"] = 1
+                    items.append(n)
+        except Exception:
+            pass
+    for url, pub in [("https://feeds.a.dj.com/rss/RSSMarketsMain.xml", "WSJ"), ("https://feeds.a.dj.com/rss/WSJcomUSBusiness.xml", "WSJ"), ("https://feeds.a.dj.com/rss/RSSWorldNews.xml", "WSJ")]:
+        try:
+            r = requests.get(url, headers=headers, timeout=7)
+            if r.ok:
+                items.extend(_market_parse_rss_items(r.content, pub, source_rank=1, limit=45))
+        except Exception:
+            pass
+    queries = [
+        "latest stock market news policy rates earnings global market",
+        "market news Federal Reserve CPI tariffs earnings guidance",
+        "global market news China Europe Japan Middle East oil",
+        "Hormuz conflict oil market impact airlines energy shipping",
+        "management change CEO CFO stock market latest",
+        "financial release earnings guidance major companies latest",
+    ]
+    if ticker_query:
+        ticker_terms = f"{ticker_query} {ticker_company}".strip()
+        queries.insert(0, ticker_terms + " stock company market news earnings guidance")
+    if keyword.strip():
+        queries.insert(0, keyword.strip() + " market news stocks")
+    for q in queries[:8]:
+        try:
+            url = "https://news.google.com/rss/search?q=" + quote_plus(q) + "&hl=en-US&gl=US&ceid=US:en"
+            r = requests.get(url, headers=headers, timeout=7)
+            if r.ok:
+                rows = _market_parse_rss_items(r.content, "Google News", source_rank=4, limit=24)
+                for row in rows:
+                    pub = row.get("publisher", "")
+                    if pub in MARKET_SOURCE_RANK:
+                        row["source_rank"] = MARKET_SOURCE_RANK.get(pub, 4)
+                    items.append(row)
+        except Exception:
+            pass
+    kw = keyword.strip().lower()
+    tq = ticker_query.lower()
+    tc = ticker_company.lower()
+    dedup = {}
+    for n in items:
+        title = clean_text(n.get("title", "")); summary = clean_text(n.get("summary", ""))
+        if not title: continue
+        blob = f"{title} {summary} {n.get('publisher','')}".lower()
+        category = _market_category(blob); country = _market_detect_country(blob); impact = _market_impact_analysis(title, summary)
+        if kw and kw not in blob:
+            continue
+        if tq:
+            impact_companies = " ".join(impact.get("companies", []))
+            ticker_blob = f"{blob} {n.get('ticker','')} {ticker_company} {impact_companies}".lower()
+            ticker_match = str(n.get("ticker", "")).upper() == ticker_query
+            if ticker_query in {str(c).upper() for c in impact.get("companies", [])}:
+                ticker_match = True
+            if len(tq) > 3:
+                ticker_pat = r"(?<![a-z0-9])" + re.escape(tq) + r"(?![a-z0-9])"
+                ticker_match = ticker_match or bool(re.search(ticker_pat, ticker_blob))
+            if tc and tc in ticker_blob:
+                ticker_match = True
+            if not ticker_match:
+                continue
+        importance, sentiment = _market_score_and_sentiment(title, summary, n.get("publisher", ""))
+        importance = clamp(importance + min(14, 2 * len(impact.get("companies", []))))
+        n.update({"ai_title": _market_ai_headline(title), "category": category, "country": country, "impact": impact, "importance": importance, "sentiment": sentiment, "ai_summary": _market_ai_summary(title, summary, category, impact), "industry_tags": sorted(set([x.split(",")[0].strip() for x in impact.get("good_for", []) + impact.get("bad_for", [])]))[:8]})
+        key = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()[:95]
+        old = dedup.get(key)
+        new_tuple = (n.get("source_rank", 5), -n.get("importance", 0), -n.get("ts", 0))
+        old_tuple = (old.get("source_rank", 5), -old.get("importance", 0), -old.get("ts", 0)) if old else None
+        if old is None or new_tuple < old_tuple:
+            dedup[key] = n
+    out = list(dedup.values())
+    out.sort(key=lambda x: (x.get("importance", 0), x.get("ts", 0)), reverse=True)
+    important = [x for x in out if x.get("importance", 0) >= 70]
+    recent = sorted(out, key=lambda x: x.get("ts", 0), reverse=True)[:18]
+    merged, seen = [], set()
+    for x in important + out[:35] + recent:
+        k = re.sub(r"[^a-z0-9]+", " ", x.get("title", "").lower()).strip()[:95]
+        if k and k not in seen:
+            seen.add(k); merged.append(x)
+    return merged[:48]
+
+
+def render_market_news_item(n):
+    ts = n.get("ts") or 0
+    when = datetime.fromtimestamp(ts).strftime("%b %d, %Y %I:%M %p") if ts else "Recent"
+    sentiment = n.get("sentiment", "Mixed / Watch")
+    cls = "news-positive" if sentiment == "Positive" else "news-negative" if sentiment == "Negative" else "news-neutral"
+    title_raw = n.get("ai_title") or n.get("title", "Market update")
+    title = html.escape(translate_text_optional(title_raw, lang_code()) if lang_code() == "zh" else title_raw)
+    summary_raw = n.get("ai_summary", "")
+    summary = html.escape(translate_text_optional(summary_raw, lang_code()) if lang_code() == "zh" else summary_raw)
+    publisher = html.escape(n.get("publisher", "News")); category = html.escape(tr(n.get("category", "General Market News"))); country = html.escape(tr(n.get("country", "Global")))
+    score = int(n.get("importance", 0)); impact = n.get("impact", {}) or {}
+    good = html.escape("; ".join(impact.get("good_for", [])[:4])); bad = html.escape("; ".join(impact.get("bad_for", [])[:4])); watch = html.escape("; ".join(impact.get("watch", [])[:4]))
+    companies = ", ".join(impact.get("companies", [])[:14]) or "Context-dependent"
+    link = n.get("link", "")
+    url_html = f'<a class="market-source-link" href="{html.escape(link)}" target="_blank">{tr("Open source")} ↗</a>' if link else ""
+    st.markdown(f'''
+    <div class="news-card">
+      <div class="market-card-top">
+        <div style="min-width:0;flex:1">
+          <div class="news-meta">{publisher} · {when} · {country}</div>
+          <div class="news-title">{title}</div>
+        </div>
+        <div class="market-score-ring" style="--score:{score}">{score}</div>
+      </div>
+      <span class="news-pill {cls}">{html.escape(tr(sentiment))}</span>
+      <span class="news-pill">{category}</span>
+      <span class="news-pill">{tr("Importance")} {score}/100</span>
+      <span class="news-pill">{tr("Affected")}: {html.escape(companies)}</span>
+      <div class="news-summary">{summary}</div>
+      <div class="market-impact-grid">
+        <div class="market-impact-box"><div class="market-impact-label">{tr("Good for")}</div><div class="market-impact-good">{good}</div></div>
+        <div class="market-impact-box"><div class="market-impact-label">{tr("Bad for")}</div><div class="market-impact-bad">{bad}</div></div>
+        <div class="market-impact-box"><div class="market-impact-label">{tr("Watch")}</div><div class="market-impact-watch">{watch}</div></div>
+      </div>
+      {url_html}
+    </div>
+    ''', unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════
 #  CHART BUILDERS  — clean Webull style, legends as HTML below
@@ -1057,25 +2404,29 @@ def drawdown_chart(dd):
 
 
 def returns_hist(ret):
-    r   = (ret*100).round(3)
+    r = pd.to_numeric(pd.Series(ret), errors="coerce").dropna() * 100
+    fig = _indicator_fig(220)
+    if r.empty:
+        return fig
+    r = r.round(3)
     mn  = float(r.mean())
     var = float(np.percentile(r, 5))
-    fig = _indicator_fig(220)
-    fig.add_trace(go.Histogram(x=r, nbinsx=80,
+    fig.add_trace(go.Histogram(x=r.tolist(), nbinsx=80,
         marker=dict(color=BLUE, opacity=0.55), name="Returns",
         hovertemplate="Return: %{x:.2f}%%<br>Count: %{y}"))
-    fig.add_vline(x=mn,  line_dash="dash", line_color=GREEN, line_width=1.5,
-                  annotation=dict(text=f"Mean {mn:.2f}%", font_color=GREEN,
-                                  font_size=10, y=1.0, yref="paper"))
-    fig.add_vline(x=var, line_dash="dash", line_color=RED, line_width=1.5,
-                  annotation=dict(text=f"VaR {var:.2f}%", font_color=RED,
-                                  font_size=10, y=0.85, yref="paper"))
+    if np.isfinite(mn):
+        fig.add_vline(x=mn,  line_dash="dash", line_color=GREEN, line_width=1.5,
+                      annotation=dict(text=f"Mean {mn:.2f}%", font_color=GREEN,
+                                      font_size=10, y=1.0, yref="paper"))
+    if np.isfinite(var):
+        fig.add_vline(x=var, line_dash="dash", line_color=RED, line_width=1.5,
+                      annotation=dict(text=f"VaR {var:.2f}%", font_color=RED,
+                                      font_size=10, y=0.85, yref="paper"))
     fig.update_layout(yaxis=dict(showgrid=True, gridcolor=GRID_COL, zeroline=False,
                                   tickfont=dict(color=TICK_COL, size=10), side="right"),
                       xaxis=dict(showgrid=False, tickfont=dict(color=TICK_COL, size=10),
                                   ticksuffix="%"))
     return fig
-
 
 def rolling_sharpe_chart(rs):
     fig = _indicator_fig(220)
@@ -1215,6 +2566,1860 @@ def comparison_table(t1, i1, r1, ta1, t2, i2, r2, ta2):
     ]
     return pd.DataFrame(rows)
 
+
+# ══════════════════════════════════════════════════════════════════
+#  INVESTOR VIEW — FAMOUS INVESTOR STYLE SIMULATOR
+# ══════════════════════════════════════════════════════════════════
+INVESTOR_PROFILES = {
+    "Warren Buffett": {
+        "style": "Quality value compounder", "risk": "Moderate", "horizon": "5-10 years",
+        "philosophy": "Durable moats, predictable cash flows, high return on capital, honest balance sheets, and a fair price rather than a cheap-looking low-quality stock.",
+        "likes": ["quality", "value", "stability", "cash flow", "moat"],
+        "avoids": ["unprofitable speculation", "excessive leverage", "hard-to-understand cyclicals"],
+        "weights": {"quality": .34, "value": .25, "growth": .14, "momentum": .06, "stability": .21},
+        "sector_bias": {"Consumer Defensive": 8, "Financial Services": 6, "Technology": 4, "Healthcare": 3, "Energy": 1},
+        "universe": ["BRK-B","AAPL","KO","AXP","BAC","COST","V","MA","MCO","MSFT","GOOGL","JNJ","PG","PEP","WMT","HD","UNH","XOM","CVX"],
+        "cash_base": 10, "concentration": "High-conviction, concentrated"
+    },
+    "Charlie Munger": {
+        "style": "Extreme quality + mental models", "risk": "Moderate", "horizon": "Very long term",
+        "philosophy": "Few outstanding businesses held patiently; quality and management matter more than frequent trading or statistical cheapness.",
+        "likes": ["moat", "quality", "pricing power", "management", "simplicity"],
+        "avoids": ["turnarounds", "commodity leverage", "over-diversification"],
+        "weights": {"quality": .42, "value": .18, "growth": .16, "momentum": .04, "stability": .20},
+        "sector_bias": {"Consumer Defensive": 7, "Technology": 6, "Financial Services": 4, "Healthcare": 3},
+        "universe": ["COST","BRK-B","AAPL","MSFT","GOOGL","V","MA","MCO","SPY","JNJ","PG","KO"],
+        "cash_base": 12, "concentration": "Very concentrated"
+    },
+    "Benjamin Graham": {
+        "style": "Deep value and margin of safety", "risk": "Low-Moderate", "horizon": "2-5 years",
+        "philosophy": "Prefer statistically cheap, financially sound securities with a margin of safety and less dependence on optimistic growth forecasts.",
+        "likes": ["low valuation", "balance sheet", "dividends", "mean reversion"],
+        "avoids": ["high P/E hype", "negative earnings", "narrative-only growth"],
+        "weights": {"quality": .20, "value": .43, "growth": .06, "momentum": .04, "stability": .27},
+        "sector_bias": {"Financial Services": 5, "Healthcare": 4, "Consumer Defensive": 4, "Energy": 3, "Utilities": 3},
+        "universe": ["BRK-B","JPM","BAC","C","XOM","CVX","JNJ","PFE","WMT","KO","PG","T","VZ","INTC","IBM","SPY","SHY"],
+        "cash_base": 18, "concentration": "Diversified value basket"
+    },
+    "Peter Lynch": {
+        "style": "Growth at a reasonable price", "risk": "Moderate-High", "horizon": "1-5 years",
+        "philosophy": "Find understandable businesses with earnings growth that the market has not fully appreciated; avoid overpaying for story stocks.",
+        "likes": ["earnings growth", "reasonable PEG", "consumer insight", "category leaders"],
+        "avoids": ["diworsification", "too much debt", "no earnings path"],
+        "weights": {"quality": .20, "value": .22, "growth": .29, "momentum": .14, "stability": .15},
+        "sector_bias": {"Consumer Cyclical": 6, "Technology": 5, "Healthcare": 4, "Consumer Defensive": 3, "Financial Services": 2},
+        "universe": ["COST","HD","WMT","MCD","NKE","SBUX","AMZN","GOOGL","META","MSFT","AAPL","LLY","NVO","V","MA","SHOP","MELI","PDD"],
+        "cash_base": 8, "concentration": "Diversified growth/value ideas"
+    },
+    "Ray Dalio": {
+        "style": "Macro all-weather allocation", "risk": "Balanced", "horizon": "Cycle-aware",
+        "philosophy": "Balance assets across growth/inflation regimes, diversify globally, and avoid relying on one economic outcome.",
+        "likes": ["diversification", "global exposure", "inflation hedges", "bonds", "commodities"],
+        "avoids": ["single-factor concentration", "unhedged macro bets"],
+        "weights": {"quality": .16, "value": .15, "growth": .12, "momentum": .12, "stability": .45},
+        "sector_bias": {"Consumer Defensive": 4, "Healthcare": 4, "Energy": 4, "Basic Materials": 3, "Utilities": 3},
+        "universe": ["SPY","VTI","QQQ","EEM","GLD","IAU","TLT","IEF","SHY","TIP","DBC","USO","XLE","XLV","XLP","XLF","NVDA","MSFT"],
+        "cash_base": 10, "concentration": "Balanced multi-asset"
+    },
+    "Cathie Wood": {
+        "style": "Disruptive innovation growth", "risk": "Very High", "horizon": "3-7 years",
+        "philosophy": "Favor companies with exponential technology adoption, high revenue growth, and large optionality even with valuation volatility.",
+        "likes": ["innovation", "AI", "platform growth", "genomics", "automation", "software"],
+        "avoids": ["low-growth value traps", "legacy businesses", "overly defensive assets"],
+        "weights": {"quality": .12, "value": .05, "growth": .41, "momentum": .30, "stability": .12},
+        "sector_bias": {"Technology": 12, "Healthcare": 7, "Consumer Cyclical": 4, "Communication Services": 4},
+        "universe": ["TSLA","NVDA","PLTR","COIN","SHOP","ROKU","CRSP","TDOC","PATH","DKNG","SQ","HOOD","META","AMD","CRWD","SNOW","NET","TSM","ARKK"],
+        "cash_base": 4, "concentration": "High-growth thematic"
+    },
+    "Stanley Druckenmiller": {
+        "style": "Macro momentum and concentrated winners", "risk": "High", "horizon": "Weeks to years",
+        "philosophy": "Press big macro/earnings trends, emphasize liquidity and relative strength, and cut quickly when the thesis breaks.",
+        "likes": ["momentum", "macro trend", "AI leaders", "liquidity", "asymmetric payoff"],
+        "avoids": ["stale laggards", "crowded downside without catalyst", "illiquidity"],
+        "weights": {"quality": .18, "value": .08, "growth": .27, "momentum": .34, "stability": .13},
+        "sector_bias": {"Technology": 10, "Semiconductors": 10, "Energy": 4, "Financial Services": 3},
+        "universe": ["NVDA","MSFT","META","AMZN","AVGO","AMD","TSM","ASML","GOOGL","XLE","XOM","GLD","TLT","QQQ","SPY","PLTR","CRWD"],
+        "cash_base": 8, "concentration": "Concentrated macro winners"
+    },
+    "George Soros": {
+        "style": "Reflexive macro trader", "risk": "High", "horizon": "Tactical",
+        "philosophy": "Markets can overshoot; use macro reflexivity, trend shifts, and liquidity conditions to position before consensus catches up.",
+        "likes": ["macro inflection", "currency/rate sensitivity", "momentum", "hedges"],
+        "avoids": ["static buy-and-hold assumptions", "fragile consensus trades"],
+        "weights": {"quality": .14, "value": .12, "growth": .20, "momentum": .34, "stability": .20},
+        "sector_bias": {"Technology": 5, "Financial Services": 4, "Energy": 4, "Basic Materials": 4},
+        "universe": ["SPY","QQQ","GLD","TLT","USO","XLE","XLF","NVDA","MSFT","META","JPM","BABA","TSM","EEM","FXI","UUP"],
+        "cash_base": 12, "concentration": "Tactical macro basket"
+    },
+    "Joel Greenblatt": {
+        "style": "Magic formula quality value", "risk": "Moderate", "horizon": "1-3 years",
+        "philosophy": "Buy good companies at good prices using disciplined ranking of quality and value rather than narratives.",
+        "likes": ["earnings yield", "return on capital", "free cash flow", "valuation discipline"],
+        "avoids": ["expensive low-return businesses", "story-driven speculation"],
+        "weights": {"quality": .36, "value": .36, "growth": .10, "momentum": .06, "stability": .12},
+        "sector_bias": {"Technology": 3, "Healthcare": 3, "Consumer Defensive": 3, "Industrials": 3},
+        "universe": ["MSFT","GOOGL","META","AAPL","V","MA","COST","UNH","LLY","JNJ","ADBE","ORCL","TXN","QCOM","AMGN","GILD","SPY"],
+        "cash_base": 8, "concentration": "Ranked quality-value basket"
+    },
+    "Howard Marks": {
+        "style": "Cycle-aware risk control", "risk": "Low-Moderate", "horizon": "Cycle-aware",
+        "philosophy": "Avoid permanent loss, respect credit cycles, become aggressive only when risk compensation is unusually attractive.",
+        "likes": ["margin of safety", "credit discipline", "defensive cash flow", "contrarian value"],
+        "avoids": ["euphoric pricing", "excess leverage", "late-cycle risk"],
+        "weights": {"quality": .25, "value": .27, "growth": .06, "momentum": .04, "stability": .38},
+        "sector_bias": {"Consumer Defensive": 5, "Healthcare": 5, "Utilities": 4, "Financial Services": 3, "Energy": 2},
+        "universe": ["SHY","IEF","TLT","TIP","BRK-B","JNJ","PG","KO","WMT","XOM","CVX","JPM","VZ","XLV","XLP","SPY"],
+        "cash_base": 22, "concentration": "Defensive and cycle-aware"
+    },
+    "Bill Ackman": {
+        "style": "Concentrated quality activist", "risk": "Moderate-High", "horizon": "Multi-year",
+        "philosophy": "Own a small set of simple, dominant businesses where strategic, management, or capital-allocation changes can unlock value.",
+        "likes": ["simple businesses", "pricing power", "activist catalyst", "dominant brands"],
+        "avoids": ["complex financial engineering", "weak governance", "low-quality cyclicals"],
+        "weights": {"quality": .32, "value": .20, "growth": .18, "momentum": .10, "stability": .20},
+        "sector_bias": {"Consumer Cyclical": 5, "Consumer Defensive": 5, "Communication Services": 4, "Technology": 3},
+        "universe": ["CMG","QSR","HLT","GOOGL","CP","LOW","HD","MCD","SBUX","COST","MSFT","BRK-B","SPY","V","MA"],
+        "cash_base": 8, "concentration": "Very concentrated quality/catalyst"
+    },
+    "John Templeton": {
+        "style": "Global contrarian value", "risk": "Moderate", "horizon": "3-7 years",
+        "philosophy": "Search globally for pessimism-priced assets with long-term recovery potential and avoid home-country bias.",
+        "likes": ["global diversification", "contrarian value", "emerging markets", "low expectations"],
+        "avoids": ["overcrowded consensus", "one-country concentration"],
+        "weights": {"quality": .18, "value": .34, "growth": .12, "momentum": .08, "stability": .28},
+        "sector_bias": {"Financial Services": 4, "Energy": 4, "Basic Materials": 4, "Technology": 3, "Consumer Defensive": 3},
+        "universe": ["EEM","FXI","BABA","PDD","TSM","ASML","NVO","SAP","SHEL","BP","RIO","BHP","HSBC","TM","SONY","MELI","VALE","SPY"],
+        "cash_base": 12, "concentration": "Global contrarian basket"
+    },
+}
+
+OPEN_SOURCE_MODEL_BLEND = {
+    "agent_debate": {"description": "Multi-agent investment debate pattern: bull, bear, risk, and macro lenses vote before allocation.", "weight": .35},
+    "value_checklist": {"description": "Legendary-investor checklist pattern: quality, valuation, risk, and behavior filters.", "weight": .30},
+    "quant_factor": {"description": "Portfolio factor model: value, quality, growth, momentum, and stability normalized into one score.", "weight": .35},
+}
+
+INVESTOR_DEFAULT_UNIVERSE = sorted(set(sum([v["universe"] for v in INVESTOR_PROFILES.values()], [])))
+
+
+def _safe_pct_return(close, days):
+    try:
+        c = pd.Series(close).dropna()
+        if len(c) <= days:
+            return 0.0
+        return float(c.iloc[-1] / c.iloc[-days-1] - 1) * 100
+    except Exception:
+        return 0.0
+
+
+def _max_drawdown_pct(close):
+    try:
+        c = pd.Series(close).dropna().astype(float)
+        if len(c) < 3:
+            return 0.0
+        cum = c / c.iloc[0]
+        dd = cum / cum.cummax() - 1
+        return float(dd.min() * 100)
+    except Exception:
+        return 0.0
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_market_regime_for_investor(refresh_token=0):
+    symbols = ["SPY", "QQQ", "IWM", "TLT", "GLD", "USO", "^VIX"]
+    rows = {}
+    for sym in symbols:
+        try:
+            h = yf.Ticker(sym).history(period="1y", auto_adjust=True)
+            if h is None or h.empty or "Close" not in h:
+                continue
+            close = h["Close"].dropna()
+            ma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else float(close.iloc[-1])
+            ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else ma50
+            rows[sym] = {
+                "last": float(close.iloc[-1]),
+                "ret_1m": _safe_pct_return(close, 21),
+                "ret_3m": _safe_pct_return(close, 63),
+                "above_50": float(close.iloc[-1] > ma50),
+                "above_200": float(close.iloc[-1] > ma200),
+            }
+        except Exception:
+            pass
+    spy = rows.get("SPY", {}); qqq = rows.get("QQQ", {}); iwm = rows.get("IWM", {})
+    vix = rows.get("^VIX", {}).get("last", 20)
+    risk_on = 50
+    risk_on += 12 if spy.get("above_50") else -10
+    risk_on += 10 if spy.get("above_200") else -12
+    risk_on += 8 if qqq.get("above_50") else -6
+    risk_on += 6 if iwm.get("above_50") else -5
+    risk_on += min(max(spy.get("ret_3m", 0), -12), 18) * 0.9
+    risk_on += min(max(qqq.get("ret_3m", 0), -15), 24) * 0.6
+    risk_on -= max(vix - 18, 0) * 1.2
+    risk_on += max(16 - vix, 0) * 0.6
+    risk_on = clamp(risk_on)
+    if risk_on >= 68:
+        label = "Risk-on / growth-friendly"
+    elif risk_on <= 38:
+        label = "Risk-off / defensive"
+    else:
+        label = "Mixed / selective"
+    return {"risk_on": risk_on, "label": label, "assets": rows}
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_investor_universe_data(tickers_tuple, refresh_token=0):
+    out = []
+    for t in tickers_tuple:
+        if str(t).upper() in {"CASH", "CASH / T-BILLS"}:
+            continue
+        try:
+            tk = yf.Ticker(t)
+            info = tk.info or {}
+            hist = tk.history(period="1y", auto_adjust=True)
+            if hist is None or hist.empty or "Close" not in hist:
+                continue
+            hist_ta = calc_ta(hist)
+            close = hist["Close"].dropna()
+            last = hist_ta.iloc[-1] if len(hist_ta) else pd.Series(dtype=float)
+            ret = close.pct_change().dropna()
+            vol = float(ret.std() * np.sqrt(252) * 100) if len(ret) > 2 else 0.0
+            row = {
+                "Ticker": str(t).upper(),
+                "Company / Asset": info.get("shortName") or info.get("longName") or str(t).upper(),
+                "Sector": info.get("sector") or ("ETF / Macro" if info.get("quoteType") == "ETF" or str(t).upper() in {"SPY","QQQ","GLD","TLT","IEF","SHY","TIP","USO","DBC","EEM","FXI","XLE","XLF","XLV","XLP","ARKK","UUP"} else "Unknown"),
+                "Industry": info.get("industry") or "—",
+                "Country": info.get("country") or "Global/ETF",
+                "Market Cap": safe_float(info.get("marketCap"), 0),
+                "Price": float(close.iloc[-1]),
+                "P/E": safe_float(info.get("trailingPE"), 0),
+                "Forward P/E": safe_float(info.get("forwardPE"), 0),
+                "P/S": safe_float(info.get("priceToSalesTrailing12Months"), 0),
+                "PEG": safe_float(info.get("pegRatio"), 0),
+                "Revenue Growth": safe_float(info.get("revenueGrowth"), 0) * 100,
+                "Earnings Growth": safe_float(info.get("earningsGrowth"), 0) * 100,
+                "Net Margin": safe_float(info.get("profitMargins"), 0) * 100,
+                "ROE": safe_float(info.get("returnOnEquity"), 0) * 100,
+                "Debt/Equity": safe_float(info.get("debtToEquity"), 0) / 100,
+                "Dividend Yield": safe_float(info.get("dividendYield"), 0) * 100,
+                "Beta": safe_float(info.get("beta"), 1),
+                "1M Return": _safe_pct_return(close, 21),
+                "3M Return": _safe_pct_return(close, 63),
+                "6M Return": _safe_pct_return(close, 126),
+                "1Y Return": _safe_pct_return(close, 252),
+                "Volatility": vol,
+                "Max Drawdown": _max_drawdown_pct(close),
+                "RSI": safe_float(last.get("RSI"), 50),
+                "Above MA50": bool(safe_float(last.get("MA50"), 0) and float(close.iloc[-1]) > safe_float(last.get("MA50"), 0)),
+                "Above MA200": bool(safe_float(last.get("MA200"), 0) and float(close.iloc[-1]) > safe_float(last.get("MA200"), 0)),
+            }
+            out.append(row)
+        except Exception:
+            continue
+    return pd.DataFrame(out)
+
+
+
+# ══════════════════════════════════════════════════════════════════
+#  INVESTOR VIEW — ENHANCED SCORING & BACKTEST ENGINE v2
+# ══════════════════════════════════════════════════════════════════
+
+# ── Factor scoring: value ────────────────────────────────────────
+def _score_value(row):
+    """Multi-metric value score: P/E, Forward P/E, P/S, PEG, P/B, EV/EBITDA, dividend."""
+    pe      = row.get("P/E", 0)
+    fpe     = row.get("Forward P/E", 0)
+    ps      = row.get("P/S", 0)
+    peg     = row.get("PEG", 0)
+    pb      = row.get("P/B", 0)
+    ev_eb   = row.get("EV/EBITDA", 0)
+    div     = row.get("Dividend Yield", 0)
+
+    score = 50
+
+    # P/E — tiered with negative earnings penalty
+    if   pe > 0 and pe < 10:   score += 20
+    elif pe > 0 and pe < 15:   score += 14
+    elif pe > 0 and pe < 22:   score += 8
+    elif pe > 0 and pe < 35:   score += 1
+    elif pe > 0 and pe < 55:   score -= 8
+    elif pe > 0:               score -= 16
+    elif pe < 0:               score -= 10   # negative earnings
+    else:                      score -= 4    # missing
+
+    # Forward P/E direction (earnings trend proxy)
+    if fpe > 0 and pe > 0:
+        ratio = fpe / pe
+        if   ratio < 0.80:  score += 12   # strong earnings acceleration
+        elif ratio < 0.92:  score += 7
+        elif ratio < 1.05:  score += 2
+        elif ratio < 1.20:  score -= 4
+        else:               score -= 9
+
+    # P/S ratio
+    if   ps > 0 and ps < 1.0:   score += 14
+    elif ps > 0 and ps < 2.5:   score += 8
+    elif ps > 0 and ps < 5.0:   score += 3
+    elif ps > 0 and ps < 10:    score -= 4
+    elif ps > 0 and ps < 20:    score -= 10
+    elif ps > 0:                score -= 16
+
+    # PEG ratio (value + growth combined)
+    if   peg > 0 and peg < 0.8:  score += 16
+    elif peg > 0 and peg < 1.2:  score += 10
+    elif peg > 0 and peg < 2.0:  score += 3
+    elif peg > 0 and peg < 3.5:  score -= 6
+    elif peg > 0:                score -= 13
+
+    # Price-to-Book
+    if   pb > 0 and pb < 1.0:   score += 9
+    elif pb > 0 and pb < 2.0:   score += 5
+    elif pb > 0 and pb < 4.0:   score += 1
+    elif pb > 0 and pb < 8.0:   score -= 4
+    elif pb > 0:                score -= 8
+
+    # EV/EBITDA (enterprise-level valuation)
+    if   ev_eb > 0 and ev_eb < 6:    score += 12
+    elif ev_eb > 0 and ev_eb < 10:   score += 7
+    elif ev_eb > 0 and ev_eb < 16:   score += 2
+    elif ev_eb > 0 and ev_eb < 25:   score -= 5
+    elif ev_eb > 0 and ev_eb < 40:   score -= 10
+    elif ev_eb > 0:                  score -= 16
+
+    # Dividend yield bonus (income + financial discipline signal)
+    if div > 0:
+        score += min(div * 1.2, 7)
+
+    return clamp(score)
+
+
+# ── Factor scoring: quality ──────────────────────────────────────
+def _score_quality(row):
+    """Quality score: margins, ROE, leverage, earnings quality, liquidity."""
+    margin      = row.get("Net Margin", 0)
+    roe         = row.get("ROE", 0)
+    debt        = row.get("Debt/Equity", 0)
+    rev_growth  = row.get("Revenue Growth", 0)
+    earn_growth = row.get("Earnings Growth", 0)
+
+    score = 50
+
+    # Net margin: strong positive slope, heavy penalty for negative
+    if   margin > 25:   score += 22
+    elif margin > 15:   score += 14
+    elif margin > 8:    score += 7
+    elif margin > 3:    score += 2
+    elif margin > 0:    score -= 2
+    elif margin > -8:   score -= 12
+    else:               score -= 20
+
+    # ROE: 20%+ is exceptional (Buffett threshold)
+    if   roe > 25:   score += 16
+    elif roe > 15:   score += 10
+    elif roe > 8:    score += 4
+    elif roe > 0:    score += 0
+    elif roe > -10:  score -= 8
+    else:            score -= 16
+
+    # Debt/Equity: fortress balance sheet vs overleveraged
+    if   debt < 0.20:  score += 14
+    elif debt < 0.50:  score += 9
+    elif debt < 1.0:   score += 3
+    elif debt < 2.0:   score -= 5
+    elif debt < 4.0:   score -= 13
+    else:              score -= 20
+
+    # Earnings quality: earnings growing faster than revenue can be artificially inflated
+    if rev_growth > 0 and earn_growth > 0:
+        ratio = earn_growth / max(rev_growth, 0.5)
+        if   ratio > 0 and ratio < 2.0:  score += 6   # healthy margin expansion
+        elif ratio >= 2.0 and ratio < 4: score += 2   # ok but watch
+        elif ratio >= 4.0:               score -= 5   # potential earnings quality concern
+
+    # Revenue growth consistency (quality companies have durable growth)
+    if   rev_growth > 20:  score += 9
+    elif rev_growth > 10:  score += 5
+    elif rev_growth > 5:   score += 2
+    elif rev_growth < -8:  score -= 10
+    elif rev_growth < 0:   score -= 4
+
+    return clamp(score)
+
+
+# ── Factor scoring: growth ───────────────────────────────────────
+def _score_growth(row):
+    """Growth score: revenue & earnings acceleration, margin expansion."""
+    rev  = row.get("Revenue Growth", 0)
+    earn = row.get("Earnings Growth", 0)
+    net_margin = row.get("Net Margin", 0)
+    roe  = row.get("ROE", 0)
+
+    score = 45
+
+    # Revenue growth — most reliable growth metric
+    if   rev > 35:  score += 28
+    elif rev > 20:  score += 20
+    elif rev > 12:  score += 13
+    elif rev > 6:   score += 7
+    elif rev > 0:   score += 2
+    elif rev > -8:  score -= 8
+    else:           score -= 18
+
+    # Earnings growth — add-on but clip for cash flow quality
+    if   earn > 40:  score += 14
+    elif earn > 20:  score += 9
+    elif earn > 10:  score += 4
+    elif earn > 0:   score += 1
+    elif earn < -15: score -= 10
+    elif earn < 0:   score -= 4
+
+    # High-quality growth: strong revenue + positive margins (not just burn)
+    if rev > 20 and net_margin > 8:   score += 9
+    if rev > 10 and roe > 15:          score += 5
+
+    # Profitless growth penalty (growth-at-any-cost risk)
+    if rev > 20 and net_margin < -5:  score -= 8
+
+    return clamp(score)
+
+
+# ── Factor scoring: momentum ─────────────────────────────────────
+def _score_momentum(row):
+    """Momentum: skip-month risk-adjusted momentum, MA filters, RSI regime."""
+    ret_1m  = row.get("1M Return", 0)
+    ret_3m  = row.get("3M Return", 0)
+    ret_6m  = row.get("6M Return", 0)
+    ret_12m = row.get("1Y Return", 0)
+    above50 = row.get("Above MA50", False)
+    above200= row.get("Above MA200", False)
+    rsi     = row.get("RSI", 50)
+    vol     = max(row.get("Volatility", 30), 5)
+
+    score = 45
+
+    # Skip-month momentum (remove 1M reversal; academic standard since Jegadeesh-Titman)
+    skip_mom = ret_12m - ret_1m if ret_12m != 0 else ret_6m
+    score += min(max(skip_mom, -35), 45) * 0.25
+
+    # 3M momentum — strongest predictor in cross-section
+    score += min(max(ret_3m, -20), 35) * 0.72
+
+    # 6M momentum — medium-term continuation
+    score += min(max(ret_6m, -30), 55) * 0.32
+
+    # Risk-adjusted 3M momentum (Sharpe-like: return per unit of vol)
+    risk_adj = ret_3m / vol * 30
+    score += min(max(risk_adj, -10), 14) * 0.45
+
+    # Moving average filters (trend regime)
+    score += 8 if above50  else -7
+    score += 9 if above200 else -8
+
+    # RSI regime filter (avoid extreme overbought, penalize oversold)
+    if   45 <= rsi <= 68:  score += 6   # healthy momentum range
+    elif rsi > 80:         score -= 12  # overbought reversal risk
+    elif rsi > 72:         score -= 4
+    elif rsi < 28:         score -= 14  # extreme oversold
+    elif rsi < 38:         score -= 6
+
+    return clamp(score)
+
+
+# ── Factor scoring: stability ────────────────────────────────────
+def _score_stability(row):
+    """Stability: beta, volatility, drawdown depth, dividend yield."""
+    beta  = row.get("Beta", 1.0)
+    vol   = row.get("Volatility", 30)
+    dd    = abs(row.get("Max Drawdown", 25))
+    div   = row.get("Dividend Yield", 0)
+    debt  = row.get("Debt/Equity", 1.0)
+
+    score = 70
+
+    # Beta: penalty for market amplification, bonus for low-beta
+    if   beta < 0.4:  score += 10
+    elif beta < 0.7:  score += 6
+    elif beta < 0.9:  score += 2
+    elif beta < 1.1:  score += 0
+    elif beta < 1.4:  score -= 8
+    elif beta < 1.8:  score -= 16
+    else:             score -= 24
+
+    # Volatility: penalise excess vol above 25%
+    score -= max(vol - 22, 0) * 0.80
+
+    # Max drawdown depth
+    if   dd < 15:   score += 8
+    elif dd < 25:   score += 3
+    elif dd < 35:   score -= 5
+    elif dd < 50:   score -= 12
+    else:           score -= 20
+
+    # Dividend yield: proxy for financial stability & cash flow discipline
+    score += min(div * 2.0, 8)
+
+    # Overleveraged companies are fragile in downturns
+    if debt > 3.0: score -= 10
+    if debt > 5.0: score -= 10  # stacking
+
+    return clamp(score)
+
+
+# ── Factor aggregation ───────────────────────────────────────────
+def investor_factor_scores(row):
+    return {
+        "quality":   _score_quality(row),
+        "value":     _score_value(row),
+        "growth":    _score_growth(row),
+        "momentum":  _score_momentum(row),
+        "stability": _score_stability(row),
+    }
+
+
+# ── Per-row investor score with macro overlay ────────────────────
+def investor_score_row(row, profile, regime, stance="Balanced", news_shock=0):
+    factors = investor_factor_scores(row)
+    w = profile["weights"]
+    base = sum(factors[k] * w.get(k, 0) for k in factors)
+    sector = row.get("Sector", "Unknown")
+    sector_bonus = profile.get("sector_bias", {}).get(sector, 0)
+    risk_on = regime.get("risk_on", 50)
+
+    # Macro overlay: growth/momentum styles benefit from risk-on regimes
+    growth_exposure    = w.get("growth", 0) + w.get("momentum", 0)
+    defensive_exposure = w.get("stability", 0) + w.get("value", 0) * 0.45
+    macro_adj = (risk_on - 50) * (growth_exposure - defensive_exposure) * 0.44
+
+    # Stance amplifier
+    if   stance == "Aggressive": macro_adj += 5 + (risk_on - 50) * 0.06
+    elif stance == "Defensive":  macro_adj -= 4 + max(50 - risk_on, 0) * 0.04
+
+    # VIX/vol regime penalty for high-beta picks in risk-off
+    vix_level = regime.get("vix", 20)
+    if vix_level > 28:
+        high_beta_penalty = max(row.get("Beta", 1.0) - 1.0, 0) * (vix_level - 28) * 0.35
+        macro_adj -= high_beta_penalty
+
+    score = base + sector_bonus + macro_adj + news_shock
+    return clamp(score), factors, macro_adj + sector_bonus + news_shock
+
+
+# ── News shock layer ─────────────────────────────────────────────
+def investor_news_shock_for_row(row, news_items):
+    if not news_items:
+        return 0
+    text = (row.get("Ticker", "") + " " + row.get("Company / Asset", "") + " " +
+            row.get("Sector", "") + " " + row.get("Industry", "")).lower()
+    score = 0
+    for n in news_items[:18]:
+        nt = " ".join([
+            str(n.get("title", "")), str(n.get("summary", "")),
+            " ".join(n.get("industry_tags", [])),
+            " ".join(n.get("impact", {}).get("good_for", [])),
+            " ".join(n.get("impact", {}).get("bad_for", [])),
+            " ".join(n.get("impact", {}).get("companies", [])),
+        ]).lower()
+        importance = safe_float(n.get("importance"), 50)
+        if (row.get("Ticker", "").lower() in nt or
+                row.get("Sector", "").lower() in nt or
+                any(x in nt for x in text.split()[:3] if len(x) > 4)):
+            direction = 0
+            if row.get("Sector", "").lower() in " ".join(n.get("impact", {}).get("good_for", [])).lower():
+                direction += 1
+            if row.get("Ticker", "").lower() in " ".join(n.get("impact", {}).get("companies", [])).lower():
+                direction += 0.7
+            if row.get("Sector", "").lower() in " ".join(n.get("impact", {}).get("bad_for", [])).lower():
+                direction -= 1
+            # Thematic macro shocks
+            if any(k in nt for k in ["rate hike", "fed", "inflation", "cpi"]):
+                if row.get("Sector") in {"Utilities", "Real Estate"}:   direction -= 0.5
+                if row.get("Sector") == "Financial Services":            direction += 0.4
+            if any(k in nt for k in ["hormuz", "oil", "middle east", "conflict", "shipping"]):
+                if row.get("Sector") == "Energy":                        direction += 1.1
+                if row.get("Sector") in {"Consumer Cyclical", "Industrials"}: direction -= 0.5
+            if any(k in nt for k in ["ai", "chip", "semiconductor", "nvidia", "data center"]):
+                if row.get("Sector") == "Technology":                    direction += 0.7
+            score += direction * min(8, importance / 12)
+    return max(-10, min(10, score))
+
+
+# ── Portfolio simulator ──────────────────────────────────────────
+def simulate_investor_portfolio(investor_name, stance="Balanced", max_holdings=10,
+                                 model_blend=65, use_news=True, refresh_token=0):
+    profile = INVESTOR_PROFILES[investor_name]
+    tickers = tuple(sorted(set(profile["universe"])))
+    regime  = fetch_market_regime_for_investor(refresh_token)
+    df      = fetch_investor_universe_data(tickers, refresh_token)
+
+    news_items = []
+    if use_news and "fetch_market_news" in globals():
+        try:
+            news_items = fetch_market_news("", "", refresh_token)[:25]
+        except Exception:
+            news_items = []
+
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame(), regime, profile, []
+
+    rows = []
+    for _, row in df.iterrows():
+        rowd = row.to_dict()
+        shock = investor_news_shock_for_row(rowd, news_items) if use_news else 0
+        style_score, factors, adj = investor_score_row(rowd, profile, regime, stance=stance, news_shock=shock)
+
+        # Generic multi-factor model (open-source ensemble component)
+        generic = (0.22 * factors["quality"] + 0.18 * factors["value"] +
+                   0.24 * factors["growth"]  + 0.20 * factors["momentum"] +
+                   0.16 * factors["stability"])
+
+        final = style_score * (model_blend / 100) + generic * (1 - model_blend / 100)
+
+        # Build transparent reason string
+        top_factor = max(factors, key=factors.get)
+        reason_bits = [f"{top_factor.title()} {factors[top_factor]:.0f}/100"]
+        if adj > 4:   reason_bits.append("macro/style tailwind")
+        if adj < -4:  reason_bits.append("macro/style headwind")
+        if shock > 2: reason_bits.append("news tailwind")
+        if shock < -2:reason_bits.append("news risk")
+
+        # Compute individual risk contribution proxy (vol * beta)
+        vol  = rowd.get("Volatility", 25)
+        beta = rowd.get("Beta", 1.0)
+        risk_score = min(vol * max(beta, 0.3) / 30, 2.0)   # normalised 0-2
+
+        rowd.update({
+            "Investor Score": round(final, 1),
+            "Style Match":    round(style_score, 1),
+            "Quality":        factors["quality"],
+            "Value":          factors["value"],
+            "Growth":         factors["growth"],
+            "Momentum":       factors["momentum"],
+            "Stability":      factors["stability"],
+            "News Shock":     round(shock, 1),
+            "Risk Index":     round(risk_score, 2),
+            "Reason":         "; ".join(reason_bits),
+        })
+        rows.append(rowd)
+
+    scored = (
+        pd.DataFrame(rows)
+        .sort_values(["Investor Score", "Market Cap"], ascending=[False, False])
+        .head(max_holdings)
+        .copy()
+    )
+
+    # ── Cash target: regime + stance + profile-base ──────────────
+    risk_on = regime.get("risk_on", 50)
+    cash = float(profile.get("cash_base", 8))
+    cash += max(45 - risk_on, 0) * 0.38       # risk-off → more cash
+    cash -= max(risk_on - 65, 0) * 0.18       # risk-on  → less cash
+    if stance == "Aggressive": cash -= 6
+    elif stance == "Defensive": cash += 10
+    # VIX spike: emergency cash buffer
+    vix = regime.get("vix", 20)
+    if vix > 30: cash += (vix - 30) * 0.5
+    cash = max(0.0, min(40.0, cash))
+
+    # ── Weight allocation: score-driven with position limits ─────
+    raw = np.maximum(scored["Investor Score"].astype(float).to_numpy() - 45, 1.0)
+    power = 1.55 if "concentrated" in profile.get("concentration", "").lower() else 1.18
+    raw = raw ** power
+
+    equity_budget = 100.0 - cash
+    weights_raw = raw / raw.sum() * equity_budget if raw.sum() else np.zeros(len(raw))
+
+    # Position limits: cap any single holding
+    max_pos = 35.0 if "concentrated" in profile.get("concentration", "").lower() else 25.0
+    min_pos = 1.5
+    weights_clipped = np.clip(weights_raw, min_pos, max_pos)
+    # Renormalise after clipping
+    if weights_clipped.sum() > 0:
+        weights_clipped = weights_clipped / weights_clipped.sum() * equity_budget
+    weights_clipped = np.round(weights_clipped, 2)
+
+    scored["Weight"] = weights_clipped
+
+    if cash >= 1.0:
+        cash_row = {
+            "Ticker": "CASH", "Company / Asset": "Cash / T-Bills (3M)",
+            "Sector": "Cash / Defense", "Industry": "Liquidity", "Country": "US",
+            "Price": 1.0, "Investor Score": 50, "Style Match": 50,
+            "Quality": 50, "Value": 50, "Growth": 0, "Momentum": 0,
+            "Stability": 92, "News Shock": 0, "Risk Index": 0.05,
+            "Reason": f"dry powder & risk control ({stance} stance, risk-on={risk_on:.0f}/100)",
+            "Weight": round(cash, 2),
+        }
+        scored = pd.concat([scored, pd.DataFrame([cash_row])], ignore_index=True)
+
+    sector = (scored
+              .groupby("Sector", as_index=False)["Weight"]
+              .sum()
+              .sort_values("Weight", ascending=False))
+    return scored, sector, regime, profile, news_items
+
+
+# ══════════════════════════════════════════════════════════════════
+#  ALLOCATION CHARTS
+# ══════════════════════════════════════════════════════════════════
+
+def investor_allocation_fig(port):
+    """Donut chart with hover details for portfolio allocation."""
+    fig = go.Figure()
+    if port is None or port.empty:
+        return fig
+
+    # Assign colors: CASH always grey
+    palette = ["#00E5FF","#FFB000","#22C55E","#FF4D6D","#A78BFA","#F97316",
+               "#3B82F6","#E879F9","#14B8A6","#A3E635","#F43F5E","#38BDF8",
+               "#FBBF24","#6EE7B7"]
+    colors = []
+    for _, r in port.iterrows():
+        colors.append("#64748B" if str(r.get("Ticker","")) == "CASH"
+                      else palette[len(colors) % len(palette)])
+
+    labels = port["Ticker"].astype(str).tolist()
+    names  = port["Company / Asset"].astype(str).tolist() if "Company / Asset" in port.columns else labels
+    scores = port["Investor Score"].tolist() if "Investor Score" in port.columns else [50]*len(labels)
+    weights = port["Weight"].tolist()
+
+    hover = [
+        f"<b>{lbl}</b><br>{nm}<br>Weight: {w:.1f}%<br>Score: {s:.0f}/100"
+        for lbl, nm, w, s in zip(labels, names, weights, scores)
+    ]
+
+    fig.add_trace(go.Pie(
+        labels=labels,
+        values=weights,
+        hole=0.50,
+        textinfo="label+percent",
+        textfont=dict(size=11, color="#F8FAFC"),
+        marker=dict(colors=colors, line=dict(color="#0d0f14", width=1.6)),
+        hovertemplate="%{customdata}<extra></extra>",
+        customdata=hover,
+        pull=[0.04 if str(port.iloc[i].get("Ticker","")) != "CASH" and
+              float(port.iloc[i].get("Weight",0)) == port[port["Ticker"]!="CASH"]["Weight"].max()
+              else 0 for i in range(len(port))],
+        sort=False,
+    ))
+    # Centre annotation
+    total_eq = float(port[port["Ticker"] != "CASH"]["Weight"].sum())
+    fig.add_annotation(
+        text=f"<b>{total_eq:.0f}%</b><br><span style='font-size:9px'>Equity</span>",
+        x=0.5, y=0.5, showarrow=False, font=dict(size=14, color="#F8FAFC"),
+        xanchor="center", yanchor="middle",
+    )
+    fig.update_layout(**base_layout(height=390))
+    fig.update_layout(margin=dict(l=10, r=10, t=24, b=10), showlegend=False)
+    return fig
+
+
+def investor_sector_fig(sector):
+    """Premium horizontal sector bar with gradient colours."""
+    fig = go.Figure()
+    if sector is None or sector.empty:
+        return fig
+    data = sector.copy()
+    data["Weight"] = pd.to_numeric(data["Weight"], errors="coerce").fillna(0)
+    data = data[data["Weight"] > 0].sort_values("Weight", ascending=True)  # ascending for horizontal
+    if data.empty:
+        return fig
+
+    palette = ["#00E5FF","#FFB000","#FF4D6D","#7C3AED","#22C55E","#F97316",
+               "#3B82F6","#E879F9","#14B8A6","#A3E635","#F43F5E","#94A3B8"]
+    colors = [palette[i % len(palette)] for i in range(len(data))]
+
+    fig.add_trace(go.Bar(
+        y=data["Sector"].astype(str),
+        x=data["Weight"],
+        orientation="h",
+        marker=dict(
+            color=colors,
+            line=dict(color="rgba(255,255,255,0.28)", width=0.8),
+            opacity=0.92,
+        ),
+        text=[f"{x:.1f}%" for x in data["Weight"]],
+        textposition="outside",
+        textfont=dict(color="#F8FAFC", size=11, family="SF Mono, Fira Code, monospace"),
+        hovertemplate="<b>%{y}</b><br>Weight: %{x:.1f}%<extra></extra>",
+        cliponaxis=False,
+    ))
+
+    xmax = max(float(data["Weight"].max()) * 1.28, 12)
+    fig.update_layout(**base_layout(height=390))
+    fig.update_layout(
+        plot_bgcolor="#08111F", paper_bgcolor="#08111F",
+        bargap=0.30, margin=dict(l=10, r=70, t=32, b=14),
+        showlegend=False,
+        title=dict(text="Sector Allocation", font=dict(size=12, color="#E2E8F0"), x=0.01, y=0.99),
+        xaxis=dict(
+            ticksuffix="%", range=[0, xmax], showgrid=True,
+            gridcolor="rgba(148,163,184,0.12)", zeroline=True,
+            zerolinecolor="rgba(248,250,252,0.28)", tickfont=dict(color="#94A3B8", size=10),
+        ),
+        yaxis=dict(
+            showgrid=False, tickfont=dict(color="#CBD5E1", size=10),
+            automargin=True,
+        ),
+        hoverlabel=dict(bgcolor="#111827", bordercolor="#38BDF8",
+                        font=dict(color="#F8FAFC", size=12, family="monospace")),
+    )
+    return fig
+
+
+def investor_factor_radar_fig(port, profile):
+    """Radar / spider chart of weighted-average factor exposures vs style weights."""
+    if port is None or port.empty:
+        return go.Figure()
+
+    cats = ["Quality","Value","Growth","Momentum","Stability"]
+    # Weighted average of each factor across equity holdings
+    port_eq = port[port["Ticker"] != "CASH"].copy()
+    wsum = port_eq["Weight"].astype(float).sum()
+
+    port_vals = []
+    for c in cats:
+        if c in port_eq.columns and wsum > 0:
+            v = float((port_eq[c].astype(float) * port_eq["Weight"].astype(float)).sum() / wsum)
+        else:
+            v = 50.0
+        port_vals.append(v)
+
+    # Investor style target (profile weights → scaled to 0-100)
+    w = profile.get("weights", {})
+    max_w = max(w.values()) if w else 1
+    style_vals = [w.get(c.lower(), 0) / max_w * 100 for c in cats]
+
+    fig = go.Figure()
+    cats_closed = cats + [cats[0]]
+    port_closed  = port_vals + [port_vals[0]]
+    style_closed = style_vals + [style_vals[0]]
+
+    fig.add_trace(go.Scatterpolar(
+        r=port_closed, theta=cats_closed, fill="toself", name="Portfolio Factors",
+        fillcolor="rgba(59,130,246,0.18)", line=dict(color="#3B82F6", width=2.5),
+    ))
+    fig.add_trace(go.Scatterpolar(
+        r=style_closed, theta=cats_closed, fill="toself", name="Investor Style Target",
+        fillcolor="rgba(245,158,11,0.12)", line=dict(color="#F59E0B", width=2.0, dash="dot"),
+    ))
+    fig.update_layout(**base_layout(height=390))
+    fig.update_layout(
+        polar=dict(
+            bgcolor="#08111F",
+            radialaxis=dict(visible=True, range=[0,100], tickfont=dict(size=9, color="#64748B"),
+                            gridcolor="rgba(148,163,184,0.15)", linecolor="rgba(148,163,184,0.20)"),
+            angularaxis=dict(tickfont=dict(size=11, color="#CBD5E1"),
+                             linecolor="rgba(148,163,184,0.25)"),
+        ),
+        showlegend=True,
+        legend=dict(
+            orientation="h", y=-0.10, x=0.5, xanchor="center", yanchor="top",
+            font=dict(size=11, color="#CBD5E1"),
+            bgcolor="rgba(8,17,31,0.85)",
+            bordercolor="rgba(59,130,246,0.30)",
+            borderwidth=1,
+            itemsizing="constant",
+            tracegroupgap=0,
+        ),
+        margin=dict(l=40, r=40, t=36, b=90),
+    )
+    return fig
+
+
+# ══════════════════════════════════════════════════════════════════
+#  AI PORTFOLIO EXPLANATION
+# ══════════════════════════════════════════════════════════════════
+
+def _investor_weighted_avg(port, col):
+    try:
+        d = port[(port["Ticker"] != "CASH") & port[col].notna()].copy()
+        if d.empty: return 0.0
+        w = d["Weight"].astype(float)
+        return float((d[col].astype(float) * w).sum() / w.sum()) if w.sum() > 0 else float(d[col].astype(float).mean())
+    except Exception:
+        return 0.0
+
+
+def investor_ai_portfolio_explanation(name, profile, regime, port, stance="Balanced", model_blend=70, use_news=True, news_used=None):
+    news_used = news_used or []
+    if port is None or port.empty:
+        return "Portfolio explanation unavailable", "The model could not fetch enough data to explain this simulated allocation."
+
+    eq = port[port["Ticker"] != "CASH"]
+    top_names  = ", ".join(eq.head(3)["Ticker"].astype(str).tolist()) if not eq.empty else "—"
+    top_sector = port.groupby("Sector")["Weight"].sum().idxmax() if not port.empty else "—"
+    sector_weight = float(port.groupby("Sector")["Weight"].sum().max()) if not port.empty else 0
+    cash_weight   = float(port[port["Ticker"]=="CASH"]["Weight"].sum()) if "Ticker" in port.columns else 0
+    risk_on = regime.get("risk_on", 50)
+
+    avg_quality   = _investor_weighted_avg(port, "Quality")
+    avg_value     = _investor_weighted_avg(port, "Value")
+    avg_growth    = _investor_weighted_avg(port, "Growth")
+    avg_momentum  = _investor_weighted_avg(port, "Momentum")
+    avg_stability = _investor_weighted_avg(port, "Stability")
+    avg_score     = _investor_weighted_avg(port, "Investor Score")
+
+    _factor_avgs = {"quality": avg_quality, "value": avg_value,
+                    "growth": avg_growth, "momentum": avg_momentum,
+                    "stability": avg_stability}
+    leading = max(_factor_avgs, key=_factor_avgs.get)
+
+    news_sentence = ""
+    if use_news and news_used:
+        top = news_used[0].get("ai_headline", news_used[0].get("title",""))
+        news_sentence = f" Active news shock layer detected theme: '{top[:80]}...' influencing sector tilts."
+
+    headline = f"{name}-style {leading} tilt: {top_names} lead the simulated portfolio"
+    paragraph = (
+        f"The simulated {name} portfolio allocates mainly to {top_names}, with the largest sector tilt in "
+        f"{top_sector} ({sector_weight:.1f}% of total allocation) and {cash_weight:.1f}% in cash/defense. "
+        f"The model selected this mix because the {name} framework emphasises "
+        f"{profile.get('concentration','diversified allocation')}. "
+        f"Current market regime: {regime.get('label','—')} (risk-on score {risk_on:.0f}/100), "
+        f"model blend {model_blend}% investor style vs {100-model_blend}% generic multi-factor. "
+        f"Weighted portfolio factor scores: quality {avg_quality:.0f}/100, value {avg_value:.0f}/100, "
+        f"growth {avg_growth:.0f}/100, momentum {avg_momentum:.0f}/100, stability {avg_stability:.0f}/100 "
+        f"→ composite investor score {avg_score:.1f}/100.{news_sentence} "
+        f"This is an AI-style educational simulation of the investor's documented framework, "
+        f"not a claim about real holdings or private opinion."
+    )
+    return headline, paragraph
+
+
+def render_investor_ai_explanation(name, profile, regime, port, stance="Balanced", model_blend=70, use_news=True, news_used=None):
+    headline, paragraph = investor_ai_portfolio_explanation(name, profile, regime, port, stance, model_blend, use_news, news_used)
+    st.markdown(f"""
+    <div class="investor-ai-box">
+      <div class="investor-ai-kicker">{html.escape(tr('AI portfolio explanation'))}</div>
+      <div class="investor-ai-headline">{html.escape(headline)}</div>
+      <div class="investor-ai-body">{html.escape(paragraph)}</div>
+    </div>""", unsafe_allow_html=True)
+
+
+def render_investor_card(name, profile, regime, port):
+    top_txt = ", ".join(port[port["Ticker"]!="CASH"].head(3)["Ticker"].astype(str).tolist()) if port is not None and not port.empty else "—"
+    st.markdown(f"""
+    <div class="investor-card">
+      <div class="investor-title">{html.escape(name)} · {html.escape(profile.get('style',''))}</div>
+      <div class="investor-subtitle">{html.escape(profile.get('philosophy',''))}</div>
+      <div class="investor-pill-row">
+        <span class="investor-pill">Horizon: {html.escape(profile.get('horizon','—'))}</span>
+        <span class="investor-pill">Risk: {html.escape(profile.get('risk','—'))}</span>
+        <span class="investor-pill">Regime: {html.escape(regime.get('label','—'))}</span>
+        <span class="investor-pill">Top ideas: {html.escape(top_txt)}</span>
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  BACKTEST ENGINE — ENHANCED
+# ══════════════════════════════════════════════════════════════════
+
+def fetch_investor_backtest_prices(tickers_tuple, period="1y", refresh_token=0):
+    """Fetch adjusted historical prices for Investor View backtests."""
+    frames = []
+    custom_years = None
+    period_str = str(period).lower().strip()
+    m = re.fullmatch(r"(\d+)y", period_str)
+    if m and int(m.group(1)) not in {1, 2, 5, 10}:
+        custom_years = int(m.group(1))
+        yf_period = "max"
+    else:
+        yf_period = period
+
+    cutoff = None
+    if custom_years:
+        cutoff = pd.Timestamp.today().normalize() - pd.DateOffset(years=custom_years)
+
+    for raw_ticker in tickers_tuple:
+        t = str(raw_ticker).upper().strip()
+        if not t or t in {"CASH", "CASH / T-BILLS", "CASH / T-BILLS (3M)"}:
+            continue
+        try:
+            h = yf.Ticker(t).history(period=yf_period, auto_adjust=True)
+            if h is None or h.empty or "Close" not in h.columns:
+                continue
+            close = pd.to_numeric(h["Close"], errors="coerce").dropna().rename(t)
+            if isinstance(close.index, pd.DatetimeIndex):
+                close.index = close.index.tz_localize(None) if close.index.tz is not None else close.index
+            if cutoff is not None:
+                close = close[close.index >= cutoff]
+            if close.empty:
+                continue
+            frames.append(close)
+        except Exception:
+            continue
+    if not frames:
+        return pd.DataFrame()
+    prices = pd.concat(frames, axis=1).sort_index().ffill().dropna(how="all")
+    return prices
+
+
+def _portfolio_cash_daily_return(annual_cash_rate=0.045):
+    try:
+        return (1 + float(annual_cash_rate)) ** (1/252) - 1
+    except Exception:
+        return 0.0
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_spy_benchmark(period="1y", refresh_token=0):
+    """Fetch SPY as benchmark for the backtest. Always shown."""
+    try:
+        period_str = str(period).lower().strip()
+        m = re.fullmatch(r"(\d+)y", period_str)
+        if m and int(m.group(1)) not in {1,2,5,10}:
+            yf_p = "max"
+            cutoff = pd.Timestamp.today().normalize() - pd.DateOffset(years=int(m.group(1)))
+        else:
+            yf_p = period
+            cutoff = None
+        h = yf.Ticker("SPY").history(period=yf_p, auto_adjust=True)
+        if h is None or h.empty or "Close" not in h.columns:
+            return pd.Series(dtype=float)
+        close = pd.to_numeric(h["Close"], errors="coerce").dropna()
+        if isinstance(close.index, pd.DatetimeIndex):
+            close.index = close.index.tz_localize(None) if close.index.tz is not None else close.index
+        if cutoff is not None:
+            close = close[close.index >= cutoff]
+        return close.rename("SPY")
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+def investor_backtest_from_portfolio(port, period="1y", refresh_token=0, rebalance="Monthly"):
+    """
+    Enhanced backtest engine:
+    - Monthly rebalancing actually rebalances on month-end dates
+    - Buy-and-hold lets weights drift naturally
+    - Computes comprehensive risk metrics vs SPY benchmark
+    """
+    empty = {"metrics": {}, "curve": pd.Series(dtype=float),
+             "drawdown": pd.Series(dtype=float),
+             "daily_returns": pd.Series(dtype=float),
+             "monthly_returns": pd.Series(dtype=float),
+             "weights": pd.Series(dtype=float),
+             "contribution": pd.DataFrame()}
+
+    if port is None or port.empty or "Ticker" not in port or "Weight" not in port:
+        return empty
+
+    clean_port = port.copy()
+    clean_port["Ticker"] = clean_port["Ticker"].astype(str).str.upper().str.strip()
+    clean_port["Weight"] = pd.to_numeric(clean_port["Weight"], errors="coerce").fillna(0.0)
+    weights = clean_port.set_index("Ticker")["Weight"] / 100.0
+    cash_tickers = {"CASH","CASH / T-BILLS","CASH / T-BILLS (3M)"}
+    cash_w = float(weights[weights.index.isin(cash_tickers)].sum())
+    equity_weights = weights[~weights.index.isin(cash_tickers)]
+    equity_weights = equity_weights[equity_weights > 0]
+
+    prices = fetch_investor_backtest_prices(tuple(equity_weights.index), period, refresh_token)
+    if prices.empty:
+        return {**empty, "weights": weights}
+
+    available = [t for t in equity_weights.index if t in prices.columns]
+    if not available:
+        return {**empty, "weights": weights}
+
+    eq_w = equity_weights.loc[available].astype(float)
+    missing_equity_w = float(equity_weights.sum() - eq_w.sum())
+    cash_w = max(0.0, cash_w + missing_equity_w)
+
+    returns = prices[available].pct_change().dropna(how="all").fillna(0.0)
+    if returns.empty:
+        return {**empty, "weights": weights}
+
+    eq_w = eq_w / max(eq_w.sum(), 1e-12) * max(0.0, 1.0 - cash_w)
+    cash_daily = _portfolio_cash_daily_return()
+
+    # ── Simulate portfolio curve ─────────────────────────────────
+    if rebalance == "Buy & Hold":
+        norm_prices = prices[available].loc[returns.index] / prices[available].loc[returns.index].iloc[0]
+        equity_curve = (norm_prices * eq_w).sum(axis=1)
+        cash_curve   = cash_w * ((1 + cash_daily) ** np.arange(len(equity_curve)))
+        curve = (equity_curve + cash_curve).rename("Portfolio")
+        daily = curve.pct_change().dropna()
+
+        # Per-holding contribution (buy & hold drift)
+        holding_vals = norm_prices * eq_w
+        contribution_return = (holding_vals.iloc[-1] - holding_vals.iloc[0]) / 1.0 * 100
+    else:
+        # Monthly rebalancing: reset weights to target on month-end dates
+        month_ends = pd.date_range(returns.index[0], returns.index[-1], freq="BME")
+        rebal_dates = set(d.normalize() for d in month_ends)
+
+        port_value = pd.Series(index=returns.index, dtype=float)
+        holding_units  = eq_w.copy()   # initial units (proportional shares)
+        total_val  = 1.0
+
+        for i, date in enumerate(returns.index):
+            day_ret = returns.loc[date]
+            # Rebalance at month-end
+            if date.normalize() in rebal_dates and i > 0:
+                # Reset to target weights
+                holding_units = eq_w * total_val / prices[available].loc[date]
+                holding_units = eq_w  # simplified: use target weights
+            r_port = (day_ret * eq_w).sum() + cash_daily * cash_w
+            total_val *= (1 + r_port)
+            port_value.iloc[i] = total_val
+
+        curve = port_value.rename("Portfolio")
+        daily = curve.pct_change().dropna()
+        daily.iloc[0] = (curve.iloc[0] - 1.0)  # first day return from 1.0
+
+        # Per-holding contribution (weighted return over full period)
+        holding_total = prices[available].iloc[-1] / prices[available].iloc[0] - 1
+        contribution_return = holding_total * eq_w * 100
+
+    curve = curve.dropna()
+    daily = curve.pct_change().fillna(0.0)
+
+    # ── Fetch SPY for relative metrics ──────────────────────────
+    spy = _fetch_spy_benchmark(period, refresh_token)
+    spy_daily = pd.Series(dtype=float)
+    spy_curve  = pd.Series(dtype=float)
+    if not spy.empty:
+        spy_aligned = spy.reindex(curve.index, method="ffill").dropna()
+        spy_curve = spy_aligned / spy_aligned.iloc[0]
+        spy_daily = spy_curve.pct_change().fillna(0.0)
+
+    # ── Core metrics ─────────────────────────────────────────────
+    running_max = curve.cummax()
+    drawdown    = (curve / running_max - 1) * 100
+
+    total_return = (float(curve.iloc[-1]) - 1.0) * 100
+    years        = max(len(daily) / 252, 1/252)
+    ann_return   = ((float(curve.iloc[-1])) ** (1/years) - 1) * 100 if curve.iloc[-1] > 0 else 0.0
+    ann_vol      = float(daily.std(ddof=1) * np.sqrt(252) * 100) if len(daily) > 1 else 0.0
+
+    rf_daily = 0.045 / 252
+    sharpe   = float((daily.mean() - rf_daily) / daily.std(ddof=1) * np.sqrt(252)) if len(daily)>1 and daily.std(ddof=1) else 0.0
+    downside = daily[daily < rf_daily]
+    sortino  = float((daily.mean()-rf_daily)/downside.std(ddof=1)*np.sqrt(252)) if len(downside)>1 and downside.std(ddof=1) else 0.0
+
+    max_dd = float(drawdown.min()) if not drawdown.empty else 0.0
+    calmar = float(ann_return / abs(max_dd)) if max_dd else 0.0
+
+    var95  = float(np.percentile(daily, 5) * 100) if len(daily) else 0.0
+    cutoff_pct = np.percentile(daily, 5) if len(daily) else 0.0
+    cvar95 = float(daily[daily <= cutoff_pct].mean() * 100) if len(daily[daily<=cutoff_pct]) else 0.0
+
+    win_rate  = float((daily > 0).mean() * 100) if len(daily) else 0.0
+    best_day  = float(daily.max() * 100) if len(daily) else 0.0
+    worst_day = float(daily.min() * 100) if len(daily) else 0.0
+
+    # ── Drawdown duration ────────────────────────────────────────
+    in_dd = (drawdown < -0.5)
+    dd_dur = 0
+    cur_dur = 0
+    for v in in_dd:
+        if v: cur_dur += 1; dd_dur = max(dd_dur, cur_dur)
+        else: cur_dur = 0
+
+    # ── Monthly returns ──────────────────────────────────────────
+    monthly = (curve.resample("ME").last().pct_change().dropna() * 100)
+
+    # ── Positive/negative month ratio (Omega-like) ───────────────
+    pos_months  = (monthly > 0).sum()
+    neg_months  = (monthly <= 0).sum()
+    win_months  = float(pos_months / max(pos_months + neg_months, 1) * 100)
+
+    # ── Benchmark-relative metrics ───────────────────────────────
+    alpha = beta_vs_spy = r_squared = treynor = info_ratio = te = 0.0
+    spy_ann_return = 0.0
+    if not spy_daily.empty and len(spy_daily) > 10:
+        port_aligned = daily.reindex(spy_daily.index).dropna()
+        spy_aligned2 = spy_daily.reindex(port_aligned.index).dropna()
+        port_aligned = port_aligned.reindex(spy_aligned2.index)
+        if len(port_aligned) > 10:
+            cov_matrix   = np.cov(port_aligned, spy_aligned2)
+            var_spy      = float(np.var(spy_aligned2, ddof=1))
+            beta_vs_spy  = float(cov_matrix[0,1] / var_spy) if var_spy > 0 else 1.0
+            alpha_daily  = port_aligned.mean() - (rf_daily + beta_vs_spy*(spy_aligned2.mean()-rf_daily))
+            alpha         = float(alpha_daily * 252 * 100)
+            corr         = float(np.corrcoef(port_aligned, spy_aligned2)[0,1])
+            r_squared    = float(corr ** 2)
+            treynor      = float((ann_return/100 - 0.045) / beta_vs_spy * 100) if beta_vs_spy else 0.0
+            active_ret   = port_aligned - spy_aligned2
+            te           = float(active_ret.std(ddof=1) * np.sqrt(252) * 100) if len(active_ret)>1 else 0.0
+            info_ratio   = float(active_ret.mean() / active_ret.std(ddof=1) * np.sqrt(252)) if te > 0 else 0.0
+
+            spy_yrs = max(len(spy_aligned2)/252, 1/252)
+            spy_total = float(spy_curve.iloc[-1]) if not spy_curve.empty else 1.0
+            spy_ann_return = float((spy_total**(1/spy_yrs)-1)*100)
+
+    # ── Omega Ratio ──────────────────────────────────────────────
+    threshold = rf_daily
+    gains = daily[daily > threshold] - threshold
+    losses = threshold - daily[daily <= threshold]
+    omega = float(gains.sum() / losses.sum()) if losses.sum() > 0 else 10.0
+
+    # ── Ulcer Index ──────────────────────────────────────────────
+    ulcer = float(np.sqrt((drawdown**2).mean())) if not drawdown.empty else 0.0
+
+    # ── Contribution table ────────────────────────────────────────
+    contrib_df = pd.DataFrame()
+    if isinstance(contribution_return, pd.Series) and not contribution_return.empty:
+        contrib_df = contribution_return.reset_index()
+        contrib_df.columns = ["Ticker","Contribution (%)"]
+        contrib_df["Contribution (%)"] = contrib_df["Contribution (%)"].round(2)
+        contrib_df = contrib_df.sort_values("Contribution (%)", ascending=False)
+
+    metrics = {
+        "Total Return":      round(total_return, 2),
+        "Annual Return":     round(ann_return, 2),
+        "SPY Annual Return": round(spy_ann_return, 2),
+        "Annual Volatility": round(ann_vol, 2),
+        "Sharpe":            round(sharpe, 3),
+        "Sortino":           round(sortino, 3),
+        "Calmar":            round(calmar, 3),
+        "Omega Ratio":       round(omega, 3),
+        "Max Drawdown":      round(max_dd, 2),
+        "Max DD Duration":   int(dd_dur),
+        "Ulcer Index":       round(ulcer, 2),
+        "VaR 95%":           round(var95, 2),
+        "CVaR 95%":          round(cvar95, 2),
+        "Win Rate (Days)":   round(win_rate, 1),
+        "Win Rate (Months)": round(win_months, 1),
+        "Best Day":          round(best_day, 2),
+        "Worst Day":         round(worst_day, 2),
+        "Beta vs SPY":       round(beta_vs_spy, 3),
+        "Alpha (Ann %)":     round(alpha, 2),
+        "R² vs SPY":         round(r_squared, 3),
+        "Treynor (%)":       round(treynor, 2),
+        "Tracking Error %":  round(te, 2),
+        "Info Ratio":        round(info_ratio, 3),
+        "Cash Weight":       round(cash_w * 100, 2),
+        "Days":              int(len(daily)),
+    }
+    return {
+        "metrics":        metrics,
+        "curve":          curve,
+        "drawdown":       drawdown,
+        "daily_returns":  daily,
+        "monthly_returns":monthly,
+        "spy_curve":      spy_curve,
+        "spy_daily":      spy_daily,
+        "weights":        weights,
+        "contribution":   contrib_df,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════
+#  BACKTEST CHARTS
+# ══════════════════════════════════════════════════════════════════
+
+def investor_backtest_comparison_fig(results, title="Investor Decision Backtest"):
+    """Return-curve chart always including SPY benchmark."""
+    fig = go.Figure()
+    palette = ["#00E5FF","#FFB000","#22C55E","#FF4D6D","#A78BFA","#F97316"]
+
+    # Add investor curves
+    for i, (label, res) in enumerate(results.items()):
+        curve = res.get("curve", pd.Series(dtype=float))
+        if curve is None or curve.empty:
+            continue
+        y = (curve / curve.iloc[0] - 1) * 100
+        fig.add_trace(go.Scatter(
+            x=y.index, y=y.values, mode="lines", name=label,
+            line=dict(color=palette[i % len(palette)], width=3.2),
+            hovertemplate=f"<b>{label}</b><br>%{{x|%Y-%m-%d}}<br>Return: %{{y:.2f}}%<extra></extra>",
+        ))
+
+    # Always add SPY benchmark
+    first_res = next(iter(results.values()), {})
+    spy_curve = first_res.get("spy_curve", pd.Series(dtype=float))
+    if spy_curve is not None and not spy_curve.empty:
+        spy_pct = (spy_curve / spy_curve.iloc[0] - 1) * 100
+        fig.add_trace(go.Scatter(
+            x=spy_pct.index, y=spy_pct.values, mode="lines", name="SPY (Benchmark)",
+            line=dict(color="#94A3B8", width=1.8, dash="dot"),
+            hovertemplate="<b>SPY Benchmark</b><br>%{x|%Y-%m-%d}<br>Return: %{y:.2f}%<extra></extra>",
+        ))
+
+    # Zero line
+    fig.add_hline(y=0, line=dict(color="rgba(248,250,252,0.20)", width=1.0, dash="dash"))
+
+    fig.update_layout(**base_layout(height=390, title=title))
+    fig.update_layout(
+        plot_bgcolor="#08111F", paper_bgcolor="#08111F", showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                    bgcolor="rgba(8,17,31,0.72)", bordercolor="rgba(148,163,184,0.22)",
+                    borderwidth=1, font=dict(size=11, color="#E2E8F0")),
+        yaxis=dict(title="Total Return", ticksuffix="%", showgrid=True,
+                   gridcolor="rgba(148,163,184,0.14)", side="right",
+                   zeroline=True, zerolinecolor="rgba(248,250,252,0.25)"),
+        xaxis=dict(showgrid=False, linecolor="rgba(148,163,184,0.30)"),
+        margin=dict(l=22, r=72, t=50, b=42),
+        hoverlabel=dict(bgcolor="#111827", bordercolor="#38BDF8",
+                        font=dict(color="#F8FAFC", size=12, family="monospace")),
+    )
+    return fig
+
+
+def investor_drawdown_comparison_fig(results):
+    """Underwater drawdown chart with SPY overlay."""
+    fig = go.Figure()
+    palette = ["#00E5FF","#FFB000","#22C55E","#FF4D6D","#A78BFA","#F97316"]
+
+    for i, (label, res) in enumerate(results.items()):
+        dd = res.get("drawdown", pd.Series(dtype=float))
+        if dd is None or dd.empty:
+            continue
+        clr = palette[i % len(palette)]
+        fig.add_trace(go.Scatter(
+            x=dd.index, y=dd.values, mode="lines", name=label,
+            line=dict(color=clr, width=2.4),
+            fill="tozeroy",
+            fillcolor=f"rgba({int(clr[1:3],16)},{int(clr[3:5],16)},{int(clr[5:7],16)},0.12)",
+            hovertemplate=f"<b>{label}</b><br>%{{x|%Y-%m-%d}}<br>Drawdown: %{{y:.2f}}%<extra></extra>",
+        ))
+
+    # SPY drawdown
+    first_res = next(iter(results.values()), {})
+    spy_curve = first_res.get("spy_curve", pd.Series(dtype=float))
+    if spy_curve is not None and not spy_curve.empty:
+        spy_run_max = spy_curve.cummax()
+        spy_dd = (spy_curve / spy_run_max - 1) * 100
+        fig.add_trace(go.Scatter(
+            x=spy_dd.index, y=spy_dd.values, mode="lines", name="SPY (Benchmark)",
+            line=dict(color="#94A3B8", width=1.6, dash="dot"),
+            hovertemplate="<b>SPY</b><br>%{x|%Y-%m-%d}<br>DD: %{y:.2f}%<extra></extra>",
+        ))
+
+    fig.add_hline(y=0, line=dict(color="rgba(248,250,252,0.18)", width=1.0))
+    fig.update_layout(**base_layout(height=320, title="Underwater Drawdown"))
+    fig.update_layout(
+        plot_bgcolor="#08111F", paper_bgcolor="#08111F", showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0,
+                    bgcolor="rgba(8,17,31,0.72)", bordercolor="rgba(148,163,184,0.22)",
+                    borderwidth=1, font=dict(size=11, color="#E2E8F0")),
+        yaxis=dict(title="Drawdown", ticksuffix="%", showgrid=True,
+                   gridcolor="rgba(148,163,184,0.14)", side="right",
+                   zeroline=True, zerolinecolor="rgba(248,250,252,0.22)"),
+        xaxis=dict(showgrid=False, linecolor="rgba(148,163,184,0.30)"),
+        margin=dict(l=22, r=72, t=50, b=42),
+        hoverlabel=dict(bgcolor="#111827", bordercolor="#38BDF8",
+                        font=dict(color="#F8FAFC", size=12, family="monospace")),
+    )
+    return fig
+
+
+def investor_rolling_metrics_fig(results):
+    """Rolling 63-day (3M) Sharpe ratio and annualised volatility."""
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.07,
+                        subplot_titles=["Rolling 3-Month Sharpe Ratio",
+                                        "Rolling 3-Month Annualised Volatility (%)"])
+    palette = ["#00E5FF","#FFB000","#22C55E","#FF4D6D"]
+    rf_daily = 0.045 / 252
+    WINDOW = 63
+
+    for i, (label, res) in enumerate(results.items()):
+        daily = res.get("daily_returns", pd.Series(dtype=float))
+        if daily is None or daily.empty or len(daily) < WINDOW:
+            continue
+        clr = palette[i % len(palette)]
+
+        roll_mean = daily.rolling(WINDOW).mean()
+        roll_std  = daily.rolling(WINDOW).std(ddof=1)
+        roll_sharpe = ((roll_mean - rf_daily) / roll_std * np.sqrt(252)).dropna()
+        roll_vol    = (roll_std * np.sqrt(252) * 100).dropna()
+
+        fig.add_trace(go.Scatter(x=roll_sharpe.index, y=roll_sharpe.values,
+                                 mode="lines", name=label, line=dict(color=clr, width=2.0),
+                                 hovertemplate=f"<b>{label}</b><br>%{{x|%Y-%m-%d}}<br>Sharpe: %{{y:.2f}}<extra></extra>"),
+                      row=1, col=1)
+        fig.add_trace(go.Scatter(x=roll_vol.index, y=roll_vol.values,
+                                 mode="lines", name=label, showlegend=False,
+                                 line=dict(color=clr, width=2.0, dash="solid"),
+                                 hovertemplate=f"<b>{label}</b><br>%{{x|%Y-%m-%d}}<br>Vol: %{{y:.1f}}%<extra></extra>"),
+                      row=2, col=1)
+
+    # SPY rolling
+    first_res = next(iter(results.values()), {})
+    spy_daily = first_res.get("spy_daily", pd.Series(dtype=float))
+    if spy_daily is not None and not spy_daily.empty and len(spy_daily) >= WINDOW:
+        s_mean = spy_daily.rolling(WINDOW).mean()
+        s_std  = spy_daily.rolling(WINDOW).std(ddof=1)
+        s_shr  = ((s_mean - rf_daily) / s_std * np.sqrt(252)).dropna()
+        s_vol  = (s_std * np.sqrt(252) * 100).dropna()
+        fig.add_trace(go.Scatter(x=s_shr.index, y=s_shr.values, mode="lines",
+                                 name="SPY", line=dict(color="#94A3B8", width=1.5, dash="dot"),
+                                 hovertemplate="<b>SPY</b><br>%{x|%Y-%m-%d}<br>Sharpe: %{y:.2f}<extra></extra>"),
+                      row=1, col=1)
+        fig.add_trace(go.Scatter(x=s_vol.index, y=s_vol.values, mode="lines",
+                                 name="SPY", showlegend=False, line=dict(color="#94A3B8", width=1.5, dash="dot"),
+                                 hovertemplate="<b>SPY</b><br>%{x|%Y-%m-%d}<br>Vol: %{y:.1f}%<extra></extra>"),
+                      row=2, col=1)
+
+    fig.add_hline(y=0, row=1, col=1, line=dict(color="rgba(248,250,252,0.20)", width=1.0, dash="dash"))
+
+    _shared = dict(showgrid=True, gridcolor="rgba(148,163,184,0.12)", zeroline=False,
+                   tickfont=dict(color="#94A3B8", size=9))
+    fig.update_layout(height=360, plot_bgcolor="#08111F", paper_bgcolor="#08111F",
+                      showlegend=True,
+                      legend=dict(orientation="h", y=1.04, x=0, xanchor="left",
+                                  bgcolor="rgba(8,17,31,0.72)", font=dict(size=10, color="#E2E8F0")),
+                      margin=dict(l=22, r=60, t=52, b=36),
+                      font=dict(color="#94A3B8", size=10),
+                      hoverlabel=dict(bgcolor="#111827", font=dict(color="#F8FAFC", size=11)))
+    fig.update_yaxes(**_shared)
+    fig.update_xaxes(showgrid=False, linecolor="rgba(148,163,184,0.28)")
+    fig.update_yaxes(ticksuffix="", row=1, col=1, side="right")
+    fig.update_yaxes(ticksuffix="%", row=2, col=1, side="right")
+    for ann in fig.layout.annotations:
+        ann.font.color = "#94A3B8"
+        ann.font.size  = 11
+    return fig
+
+
+def investor_monthly_heatmap_fig(res, label="Portfolio"):
+    """Calendar heatmap of monthly returns."""
+    monthly = res.get("monthly_returns", pd.Series(dtype=float))
+    if monthly is None or monthly.empty:
+        return go.Figure()
+
+    df = monthly.to_frame("ret")
+    df.index = pd.to_datetime(df.index)
+    df["year"]  = df.index.year
+    df["month"] = df.index.month
+
+    years  = sorted(df["year"].unique())
+    months = list(range(1,13))
+    month_labels = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
+    z_matrix = []
+    text_matrix = []
+    for yr in years:
+        row_z = []
+        row_t = []
+        for mo in months:
+            sub = df[(df["year"]==yr) & (df["month"]==mo)]
+            if sub.empty:
+                row_z.append(None); row_t.append("")
+            else:
+                v = float(sub["ret"].iloc[0])
+                row_z.append(v)
+                row_t.append(f"{v:+.1f}%")
+        z_matrix.append(row_z)
+        text_matrix.append(row_t)
+
+    fig = go.Figure(go.Heatmap(
+        z=z_matrix,
+        x=month_labels,
+        y=[str(y) for y in years],
+        text=text_matrix,
+        texttemplate="%{text}",
+        textfont=dict(size=10, color="#F8FAFC"),
+        colorscale=[
+            [0.0,   "#7F1D1D"],
+            [0.25,  "#EF4444"],
+            [0.48,  "#1E293B"],
+            [0.52,  "#1E293B"],
+            [0.75,  "#10B981"],
+            [1.0,   "#064E3B"],
+        ],
+        zmid=0,
+        zmin=-8, zmax=8,
+        showscale=True,
+        colorbar=dict(title=dict(text="%", font=dict(color="#64748B", size=10)),
+                      ticksuffix="%", tickfont=dict(color="#94A3B8", size=9), len=0.7,
+                      bgcolor="rgba(8,17,31,0.6)", bordercolor="#252A38"),
+        hovertemplate="<b>%{y} %{x}</b><br>Monthly return: %{text}<extra></extra>",
+    ))
+    fig.update_layout(
+        height=max(200, len(years)*46+80),
+        plot_bgcolor="#08111F", paper_bgcolor="#08111F",
+        margin=dict(l=55, r=70, t=36, b=28),
+        title=dict(text=f"Monthly Returns — {label}", font=dict(color="#E2E8F0", size=12), x=0.01),
+        xaxis=dict(side="top", tickfont=dict(color="#CBD5E1", size=10), showgrid=False),
+        yaxis=dict(tickfont=dict(color="#CBD5E1", size=10), showgrid=False, autorange="reversed"),
+        font=dict(color="#94A3B8"),
+    )
+    return fig
+
+
+def investor_return_dist_fig(results):
+    """Daily return distribution histogram with normal overlay."""
+    from plotly.subplots import make_subplots as _msp
+    fig = go.Figure()
+    palette = ["#00E5FF","#FFB000","#22C55E","#FF4D6D","#A78BFA"]
+
+    for i, (label, res) in enumerate(results.items()):
+        daily = res.get("daily_returns", pd.Series(dtype=float))
+        if daily is None or daily.empty:
+            continue
+        clr = palette[i % len(palette)]
+        d_pct = daily * 100
+        fig.add_trace(go.Histogram(
+            x=d_pct, name=label, nbinsx=60, opacity=0.65,
+            marker=dict(color=clr, line=dict(color="#0d0f14", width=0.5)),
+            hovertemplate=f"<b>{label}</b><br>Range: %{{x:.2f}}%<br>Count: %{{y}}<extra></extra>",
+        ))
+
+    # SPY distribution overlay
+    first_res = next(iter(results.values()), {})
+    spy_daily = first_res.get("spy_daily", pd.Series(dtype=float))
+    if spy_daily is not None and not spy_daily.empty:
+        fig.add_trace(go.Histogram(
+            x=spy_daily*100, name="SPY", nbinsx=60, opacity=0.38,
+            marker=dict(color="#94A3B8", line=dict(color="#0d0f14", width=0.4)),
+        ))
+
+    fig.update_layout(**base_layout(height=300, title="Daily Return Distribution"))
+    fig.update_layout(
+        plot_bgcolor="#08111F", paper_bgcolor="#08111F",
+        barmode="overlay",
+        legend=dict(orientation="h", y=1.04, x=0, xanchor="left",
+                    font=dict(size=10, color="#E2E8F0"), bgcolor="rgba(8,17,31,0.72)"),
+        xaxis=dict(title="Daily Return (%)", ticksuffix="%",
+                   showgrid=True, gridcolor="rgba(148,163,184,0.10)"),
+        yaxis=dict(title="Count", side="right",
+                   showgrid=True, gridcolor="rgba(148,163,184,0.10)"),
+        margin=dict(l=22, r=65, t=46, b=40),
+        hoverlabel=dict(bgcolor="#111827", font=dict(color="#F8FAFC", size=11)),
+    )
+    return fig
+
+
+def investor_contribution_fig(contrib_df):
+    """Bar chart of per-holding return contribution."""
+    if contrib_df is None or contrib_df.empty:
+        return go.Figure()
+    df = contrib_df.sort_values("Contribution (%)", ascending=True)
+    colors = [GREEN if v >= 0 else RED for v in df["Contribution (%)"]]
+    fig = go.Figure(go.Bar(
+        y=df["Ticker"].astype(str),
+        x=df["Contribution (%)"],
+        orientation="h",
+        marker=dict(color=colors, line=dict(color="#0d0f14", width=0.6)),
+        text=[f"{v:+.1f}%" for v in df["Contribution (%)"]],
+        textposition="outside",
+        textfont=dict(color="#F8FAFC", size=10),
+        hovertemplate="<b>%{y}</b><br>Contribution: %{x:.2f}%<extra></extra>",
+        cliponaxis=False,
+    ))
+    fig.add_vline(x=0, line=dict(color="rgba(248,250,252,0.20)", width=1.0))
+    fig.update_layout(**base_layout(height=max(220, len(df)*32+60),
+                                    title="Estimated Holding Contribution (%)"))
+    fig.update_layout(
+        plot_bgcolor="#08111F", paper_bgcolor="#08111F",
+        showlegend=False,
+        xaxis=dict(ticksuffix="%", showgrid=True, gridcolor="rgba(148,163,184,0.10)"),
+        yaxis=dict(showgrid=False, tickfont=dict(color="#CBD5E1", size=10), automargin=True),
+        margin=dict(l=10, r=80, t=44, b=24),
+        hoverlabel=dict(bgcolor="#111827", font=dict(color="#F8FAFC", size=11)),
+    )
+    return fig
+
+
+# ── Metrics comparison table ──────────────────────────────────────
+def investor_backtest_metrics_table(results):
+    METRIC_KEYS = [
+        "Total Return", "Annual Return", "SPY Annual Return",
+        "Annual Volatility", "Sharpe", "Sortino", "Calmar",
+        "Omega Ratio", "Max Drawdown", "Max DD Duration",
+        "Ulcer Index", "VaR 95%", "CVaR 95%",
+        "Win Rate (Days)", "Win Rate (Months)",
+        "Best Day", "Worst Day",
+        "Beta vs SPY", "Alpha (Ann %)", "R² vs SPY",
+        "Treynor (%)", "Tracking Error %", "Info Ratio",
+        "Cash Weight", "Days",
+    ]
+    rows = []
+    for label, res in results.items():
+        m = res.get("metrics", {}) or {}
+        if not m: continue
+        row = {"Investor Model": label}
+        for k in METRIC_KEYS:
+            row[k] = m.get(k, None)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+# ── Backtest panel renderer ───────────────────────────────────────
+def render_investor_backtest_panel(primary_name, primary_port, stance, max_holdings, model_blend, use_news, refresh_token):
+    st.markdown(f"<div class='section-head'>{tr('Investor decision backtest & comparison')}</div>", unsafe_allow_html=True)
+
+    b1, b2, b3, b4 = st.columns([1.0, 1.05, 1.1, 1.25])
+    lookback_label = b1.selectbox(tr("Backtest window"),
+                                  ["1M","3M","6M","1Y","2Y","5Y","10Y","20Y","25Y"],
+                                  index=3, key="investor_bt_window")
+    period_map = {"1M":"1mo","3M":"3mo","6M":"6mo","1Y":"1y","2Y":"2y",
+                  "5Y":"5y","10Y":"10y","20Y":"20y","25Y":"25y"}
+    rebalance    = b2.selectbox(tr("Backtest method"), ["Monthly","Buy & Hold"],
+                                index=0, key="investor_bt_method", format_func=tr)
+    compare_enabled = b3.checkbox(tr("Compare two investor decisions"), value=False,
+                                   key="investor_compare_enabled")
+    compare_name = primary_name
+    if compare_enabled:
+        choices     = [x for x in INVESTOR_PROFILES.keys() if x != primary_name]
+        default_idx = choices.index("Ray Dalio") if "Ray Dalio" in choices else 0
+        compare_name = b4.selectbox(tr("Compare with"), choices,
+                                    index=default_idx, key="investor_compare_name")
+    else:
+        b4.caption(tr("Enable comparison to test another investor model."))
+
+    with st.spinner("Backtesting simulated investor decisions…"):
+        primary_bt = investor_backtest_from_portfolio(primary_port, period_map.get(lookback_label,"1y"), refresh_token, rebalance)
+        results = {primary_name: primary_bt}
+        compare_port = None
+        if compare_enabled and compare_name:
+            compare_port, _, _, _, _ = simulate_investor_portfolio(compare_name, stance, max_holdings, model_blend, use_news, refresh_token)
+            compare_bt = investor_backtest_from_portfolio(compare_port, period_map.get(lookback_label,"1y"), refresh_token, rebalance)
+            results[compare_name] = compare_bt
+
+    metrics_df = investor_backtest_metrics_table(results)
+    if metrics_df.empty:
+        st.info("Backtest data could not be built from Yahoo Finance. Try a longer window or another investor profile.")
+        return
+
+    # ── Quick-glance KPI row ─────────────────────────────────────
+    p_m = primary_bt.get("metrics", {})
+    spy_ann = p_m.get("SPY Annual Return", 0)
+    ann_r   = p_m.get("Annual Return", 0)
+    excess  = ann_r - spy_ann
+
+    kpi_cols = st.columns(8)
+    kpi_cols[0].metric("Total Return",       f"{p_m.get('Total Return',0):+.2f}%")
+    kpi_cols[1].metric("Annual Return",       f"{ann_r:+.2f}%",
+                        delta=f"vs SPY {excess:+.2f}%", delta_color="normal")
+    kpi_cols[2].metric("Sharpe",              f"{p_m.get('Sharpe',0):.2f}")
+    kpi_cols[3].metric("Sortino",             f"{p_m.get('Sortino',0):.2f}")
+    kpi_cols[4].metric("Max Drawdown",        f"{p_m.get('Max Drawdown',0):.2f}%")
+    kpi_cols[5].metric("Alpha (Ann %)",       f"{p_m.get('Alpha (Ann %)',0):+.2f}%")
+    kpi_cols[6].metric("Omega Ratio",         f"{p_m.get('Omega Ratio',0):.2f}")
+    kpi_cols[7].metric("Ulcer Index",         f"{p_m.get('Ulcer Index',0):.2f}")
+
+    # ── Return curve + drawdown ──────────────────────────────────
+    left, right = st.columns([1.15, 0.85])
+    with left:
+        st.markdown('<div class="pro-chart-shell">', unsafe_allow_html=True)
+        st.plotly_chart(investor_backtest_comparison_fig(results, f"{lookback_label} Simulated Return vs SPY"),
+                        use_container_width=True,
+                        key=f"bt_ret_{primary_name}_{compare_name}_{lookback_label}_{rebalance}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with right:
+        st.markdown('<div class="pro-chart-shell">', unsafe_allow_html=True)
+        st.plotly_chart(investor_drawdown_comparison_fig(results),
+                        use_container_width=True,
+                        key=f"bt_dd_{primary_name}_{compare_name}_{lookback_label}_{rebalance}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Rolling metrics ──────────────────────────────────────────
+    if any(len(r.get("daily_returns", pd.Series(dtype=float))) >= 63 for r in results.values()):
+        st.markdown('<div class="pro-chart-shell">', unsafe_allow_html=True)
+        st.plotly_chart(investor_rolling_metrics_fig(results), use_container_width=True,
+                        key=f"bt_roll_{primary_name}_{compare_name}_{lookback_label}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Monthly heatmap + return distribution ────────────────────
+    hm_col, dist_col = st.columns([1.1, 0.9])
+    with hm_col:
+        monthly_data = primary_bt.get("monthly_returns", pd.Series(dtype=float))
+        if monthly_data is not None and not monthly_data.empty:
+            st.markdown('<div class="pro-chart-shell">', unsafe_allow_html=True)
+            st.plotly_chart(investor_monthly_heatmap_fig(primary_bt, primary_name),
+                            use_container_width=True,
+                            key=f"bt_heatmap_{primary_name}_{lookback_label}")
+            st.markdown('</div>', unsafe_allow_html=True)
+    with dist_col:
+        st.markdown('<div class="pro-chart-shell">', unsafe_allow_html=True)
+        st.plotly_chart(investor_return_dist_fig(results), use_container_width=True,
+                        key=f"bt_dist_{primary_name}_{compare_name}_{lookback_label}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Holding contribution ─────────────────────────────────────
+    contrib = primary_bt.get("contribution", pd.DataFrame())
+    if contrib is not None and not contrib.empty:
+        st.markdown(f"<div class='section-head'>Estimated Holding Return Contribution — {primary_name}</div>", unsafe_allow_html=True)
+        st.markdown('<div class="pro-chart-shell">', unsafe_allow_html=True)
+        st.plotly_chart(investor_contribution_fig(contrib), use_container_width=True,
+                        key=f"bt_contrib_{primary_name}_{lookback_label}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Full metrics comparison table ────────────────────────────
+    shead("Detailed Performance Metrics")
+
+    # Format metrics table nicely
+    fmt_map = {
+        "Total Return": "{:+.2f}%","Annual Return": "{:+.2f}%","SPY Annual Return": "{:+.2f}%",
+        "Annual Volatility": "{:.2f}%","Sharpe": "{:.3f}","Sortino": "{:.3f}","Calmar": "{:.3f}",
+        "Omega Ratio": "{:.3f}","Max Drawdown": "{:.2f}%","Max DD Duration": "{:.0f} days",
+        "Ulcer Index": "{:.2f}","VaR 95%": "{:.2f}%","CVaR 95%": "{:.2f}%",
+        "Win Rate (Days)": "{:.1f}%","Win Rate (Months)": "{:.1f}%",
+        "Best Day": "{:+.2f}%","Worst Day": "{:+.2f}%",
+        "Beta vs SPY": "{:.3f}","Alpha (Ann %)": "{:+.2f}%","R² vs SPY": "{:.3f}",
+        "Treynor (%)": "{:+.2f}%","Tracking Error %": "{:.2f}%","Info Ratio": "{:.3f}",
+        "Cash Weight": "{:.1f}%","Days": "{:.0f}",
+    }
+    display_df = metrics_df.copy()
+    for col in display_df.columns:
+        if col == "Investor Model": continue
+        fmt = fmt_map.get(col, "{:.2f}")
+        def _fmt(v, f=fmt):
+            try: return f.format(float(v))
+            except: return "—"
+        display_df[col] = display_df[col].apply(_fmt)
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    # ── Holdings comparison ───────────────────────────────────────
+    if compare_enabled and compare_port is not None and not compare_port.empty:
+        c_left, c_right = st.columns(2)
+        with c_left:
+            st.markdown(f"<div class='section-head'>{html.escape(primary_name)} {tr('simulated holdings')}</div>", unsafe_allow_html=True)
+            show = primary_port[[c for c in ["Ticker","Weight","Sector","Investor Score","Risk Index"] if c in primary_port.columns]].head(12).copy()
+            if "Weight" in show: show["Weight"] = show["Weight"].map(lambda x: f"{float(x):.2f}%")
+            st.dataframe(show, use_container_width=True, hide_index=True)
+        with c_right:
+            st.markdown(f"<div class='section-head'>{html.escape(compare_name)} {tr('simulated holdings')}</div>", unsafe_allow_html=True)
+            show2 = compare_port[[c for c in ["Ticker","Weight","Sector","Investor Score","Risk Index"] if c in compare_port.columns]].head(12).copy()
+            if "Weight" in show2: show2["Weight"] = show2["Weight"].map(lambda x: f"{float(x):.2f}%")
+            st.dataframe(show2, use_container_width=True, hide_index=True)
+
+    page_comment("Backtest methodology", [
+        "<b>Benchmark:</b> SPY (S&P 500 ETF) is always shown as the reference. Excess return = portfolio minus SPY annualised return.",
+        "<b>Monthly rebalancing:</b> positions are reset to target weights at each month-end, simulating realistic institutional portfolio management.",
+        "<b>Metrics:</b> Sharpe/Sortino use 4.5% risk-free rate. Omega = ratio of gains above threshold to losses below. Ulcer Index measures pain of drawdowns.",
+        "<b>Contribution:</b> estimated holding-level return based on price change × initial weight. Does not account for intra-period trading.",
+        "<b>Limitation:</b> this is a model backtest, not evidence that the real investor owned these assets. Past performance does not guarantee future results.",
+    ])
+
+
+# ══════════════════════════════════════════════════════════════════
+#  INVESTOR VIEW — MAIN RENDER
+# ══════════════════════════════════════════════════════════════════
+
+def render_investor_view():
+    shead("Famous Investor Simulator")
+    st.caption("Educational simulation of famous-investor styles. Does not represent any real investor's current holdings, advice, or private opinion.")
+
+    if "investor_refresh_token" not in st.session_state:
+        st.session_state.investor_refresh_token = 0
+
+    c1, c2, c3, c4, c5 = st.columns([1.45, 1.1, 0.80, 0.95, 0.75])
+    investor_name = c1.selectbox(tr("Investor profile"), list(INVESTOR_PROFILES.keys()), index=0, key="investor_profile")
+    stance        = c2.selectbox(tr("Market stance"), ["Balanced","Defensive","Aggressive"],
+                                  index=0, key="investor_stance", format_func=tr)
+    max_holdings  = c3.selectbox(tr("Max holdings"), [5,8,10,12,15], index=2, key="investor_holdings")
+    model_blend   = c4.slider(tr("Model blend"), min_value=0, max_value=100, value=70, step=5,
+                               help="100% = pure selected-investor style. 0% = generic multi-factor quant model.",
+                               key="investor_model_blend")
+    if c5.button("⟳ " + tr("Update"), key="investor_update", use_container_width=True):
+        st.session_state.investor_refresh_token = int(time.time())
+        fetch_market_regime_for_investor.clear()
+        fetch_investor_universe_data.clear()
+        _fetch_spy_benchmark.clear()
+
+    use_news = st.checkbox(tr("Use latest market-news shock layer"), value=True, key="investor_use_news")
+
+    with st.spinner("Building investor-style portfolio from live prices, market regime, factor scores, and news shock layer…"):
+        port, sector, regime, profile, news_used = simulate_investor_portfolio(
+            investor_name, stance, max_holdings, model_blend, use_news,
+            st.session_state.investor_refresh_token
+        )
+
+    render_investor_card(investor_name, profile, regime, port)
+
+    if port.empty:
+        st.info("Investor model could not fetch enough data from Yahoo Finance. Try Update or choose a different profile.")
+        return
+
+    if not port.empty:
+        render_investor_ai_explanation(investor_name, profile, regime, port, stance, model_blend, use_news, news_used)
+
+    # ── Portfolio-level KPI grid ──────────────────────────────────
+    equity      = 100 - float(port.loc[port["Ticker"].eq("CASH"), "Weight"].sum()) if "Ticker" in port else 100
+    cash        = 100 - equity
+    top_sector  = sector.iloc[0]["Sector"] if not sector.empty else "—"
+    concentration = float(port[port["Ticker"]!="CASH"].head(3)["Weight"].sum()) if not port.empty else 0
+    n_equity    = int((port["Ticker"] != "CASH").sum()) if "Ticker" in port.columns else 0
+    avg_score   = _investor_weighted_avg(port, "Investor Score")
+    avg_risk_idx= _investor_weighted_avg(port, "Risk Index") if "Risk Index" in port.columns else 0
+
+    risk_on = regime.get("risk_on", 50)
+    vix_est = regime.get("vix", 20)
+
+    st.markdown(f"""
+    <div class="investor-grid" style="grid-template-columns:repeat(8,minmax(0,1fr))">
+      <div class="investor-mini"><div class="investor-mini-label">Risk-on Score</div><div class="investor-mini-value" style="color:{'#10b981' if risk_on>62 else '#f59e0b' if risk_on>42 else '#ef4444'}">{risk_on:.0f}/100</div></div>
+      <div class="investor-mini"><div class="investor-mini-label">Equity Exposure</div><div class="investor-mini-value">{equity:.1f}%</div></div>
+      <div class="investor-mini"><div class="investor-mini-label">Cash / Defense</div><div class="investor-mini-value">{cash:.1f}%</div></div>
+      <div class="investor-mini"><div class="investor-mini-label">Top 3 Concentration</div><div class="investor-mini-value">{concentration:.1f}%</div></div>
+      <div class="investor-mini"><div class="investor-mini-label">Equity Holdings</div><div class="investor-mini-value">{n_equity}</div></div>
+      <div class="investor-mini"><div class="investor-mini-label">Avg Investor Score</div><div class="investor-mini-value" style="color:#3b82f6">{avg_score:.1f}/100</div></div>
+      <div class="investor-mini"><div class="investor-mini-label">Top Sector</div><div class="investor-mini-value" style="font-size:13px">{html.escape(top_sector[:14])}</div></div>
+      <div class="investor-mini"><div class="investor-mini-label">VIX Estimate</div><div class="investor-mini-value" style="color:{'#10b981' if vix_est<18 else '#f59e0b' if vix_est<28 else '#ef4444'}">{vix_est:.1f}</div></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Allocation + Sector + Factor Radar ───────────────────────
+    st.markdown('<div class="investor-allocation-section">', unsafe_allow_html=True)
+    al_col, sec_col, rad_col = st.columns([1.05, 0.95, 1.0])
+    with al_col:
+        st.markdown(f"<div class='section-head'>{tr('Portfolio allocation')}</div>", unsafe_allow_html=True)
+        st.markdown('<div class="pro-chart-shell">', unsafe_allow_html=True)
+        st.plotly_chart(investor_allocation_fig(port), use_container_width=True, key=f"investor_alloc_{investor_name}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with sec_col:
+        st.markdown(f"<div class='section-head'>{tr('Sector allocation')}</div>", unsafe_allow_html=True)
+        st.markdown('<div class="pro-chart-shell">', unsafe_allow_html=True)
+        st.plotly_chart(investor_sector_fig(sector), use_container_width=True, key=f"investor_sector_{investor_name}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    with rad_col:
+        st.markdown(f"<div class='section-head'>Factor Exposure Radar</div>", unsafe_allow_html=True)
+        st.markdown('<div class="pro-chart-shell">', unsafe_allow_html=True)
+        st.plotly_chart(investor_factor_radar_fig(port, profile), use_container_width=True, key=f"investor_radar_{investor_name}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown("<div style='margin-top:-1.2rem'></div>", unsafe_allow_html=True)
+
+    # ── Simulated portfolio table ─────────────────────────────────
+    show_cols = ["Ticker","Company / Asset","Sector","Country","Weight",
+                 "Investor Score","Style Match","Quality","Value","Growth",
+                 "Momentum","Stability","Risk Index","News Shock","Reason"]
+    table = port[[c for c in show_cols if c in port.columns]].copy()
+    if "Weight" in table:
+        table["Weight"] = table["Weight"].map(lambda x: f"{float(x):.2f}%")
+    for fc in ["Quality","Value","Growth","Momentum","Stability"]:
+        if fc in table.columns:
+            table[fc] = table[fc].map(lambda x: f"{float(x):.0f}/100")
+    if "Investor Score" in table.columns:
+        table["Investor Score"] = table["Investor Score"].map(lambda x: f"{float(x):.1f}/100")
+    st.markdown(f"<div class='section-head'>{tr('Simulated portfolio')}</div>", unsafe_allow_html=True)
+    st.dataframe(table, use_container_width=True, hide_index=True)
+
+    # ── Backtest section ─────────────────────────────────────────
+    render_investor_backtest_panel(investor_name, port, stance, max_holdings,
+                                    model_blend, use_news,
+                                    st.session_state.investor_refresh_token)
+
+    # ── Investor notes ───────────────────────────────────────────
+    likes  = ", ".join(profile.get("likes",  []))
+    avoids = ", ".join(profile.get("avoids", []))
+    market_view = (
+        f"{regime.get('label')} with risk-on score {regime.get('risk_on'):.0f}/100. "
+        f"The model tilts toward growth/momentum when risk appetite is strong and "
+        f"toward cash, quality, value, and defensive sectors when risk appetite weakens."
+    )
+    if news_used:
+        top_news = news_used[0].get("ai_headline", news_used[0].get("title",""))
+        market_view += f" News shock layer active — top theme: {top_news}."
+
+    st.markdown(f"""
+    <div class="investor-note"><b>{tr('Current market view')}:</b> {html.escape(market_view)}</div>
+    <div class="investor-note"><b>{tr('What this investor may like now')}:</b> {html.escape(likes)}.</div>
+    <div class="investor-note"><b>{tr('What this investor may avoid now')}:</b> {html.escape(avoids)}.</div>
+    <div class="investor-note"><b>Scoring model transparency:</b> Factor scores (Value, Quality, Growth, Momentum, Stability) are computed from live Yahoo Finance fundamentals. The final Investor Score blends the investor-style factor weights ({model_blend}%) with a generic quant multi-factor model ({100-model_blend}%), then adds market-regime overlay and news shock adjustment. Position weights use a score-power law with {('concentrated' if 'concentrated' in profile.get('concentration','').lower() else 'diversified')} style — capped at {'35%' if 'concentrated' in profile.get('concentration','').lower() else '25%'} per holding.</div>
+    """, unsafe_allow_html=True)
+
+    page_comment("Model disclaimer", [
+        "<b>Simulation only:</b> this does not claim to know what any investor currently thinks or owns.",
+        "<b>Not financial advice:</b> use as a watchlist/thesis generator, then verify fundamentals, filings, valuation, liquidity, and risk.",
+        "<b>Benchmark:</b> SPY (S&P 500) is used as the reference for Alpha, Beta, R², Tracking Error, and Information Ratio.",
+        "<b>Model mechanics:</b> allocation combines investor-style factor weights, current market regime (VIX, MA signals, SPY/QQQ/IWM breadth), news shock tags, and fundamental factor scores from Yahoo Finance.",
+    ])
+
 # ══════════════════════════════════════════════════════════════════
 #  HELPERS
 # ══════════════════════════════════════════════════════════════════
@@ -1266,6 +4471,96 @@ def with_avg(value, metric, info=None):
     a = _avg(metric, info)
     f = _fmt_avg(metric, a)
     return f"{value} (ave. {f})" if f else value
+
+
+def _fmt_statement_value(x):
+    try:
+        if pd.isna(x):
+            return "—"
+        x = float(x)
+        neg = x < 0
+        ax = abs(x)
+        if ax >= 1e12:
+            out = f"${ax/1e12:,.2f}T"
+        elif ax >= 1e9:
+            out = f"${ax/1e9:,.2f}B"
+        elif ax >= 1e6:
+            out = f"${ax/1e6:,.2f}M"
+        elif ax >= 1e3:
+            out = f"${ax/1e3:,.1f}K"
+        else:
+            out = f"${ax:,.0f}"
+        return f"({out})" if neg else out
+    except Exception:
+        return "—"
+
+
+def _fmt_statement_change(x):
+    try:
+        if pd.isna(x) or np.isinf(x):
+            return "—"
+        sign = "+" if x >= 0 else ""
+        return f"{sign}{x:.1f}%"
+    except Exception:
+        return "—"
+
+
+def _statement_period_label(col):
+    try:
+        return pd.to_datetime(col).strftime("%Y-%m-%d")
+    except Exception:
+        return str(col)
+
+
+def build_statement_comparison(stmt, rows, quarterly=True):
+    """Return selected financial statement rows with latest, previous, and YoY comparisons."""
+    if stmt is None or stmt.empty:
+        return pd.DataFrame()
+    df = stmt.copy()
+    # yfinance statements are rows=items, columns=periods. Keep newest columns first.
+    try:
+        df = df.loc[:, sorted(df.columns, reverse=True)]
+    except Exception:
+        pass
+    available_rows = [r for r in rows if r in df.index]
+    if not available_rows:
+        # Fallback: show the first meaningful rows if labels differ by ticker/source.
+        available_rows = list(df.index[:10])
+    cols = list(df.columns)
+    if not cols:
+        return pd.DataFrame()
+    latest_col = cols[0]
+    prev_col = cols[1] if len(cols) > 1 else None
+    yoy_col = cols[4] if quarterly and len(cols) > 4 else cols[1] if (not quarterly and len(cols) > 1) else None
+    out = []
+    for r in available_rows:
+        latest = pd.to_numeric(pd.Series([df.at[r, latest_col]]), errors="coerce").iloc[0]
+        prev = pd.to_numeric(pd.Series([df.at[r, prev_col]]), errors="coerce").iloc[0] if prev_col is not None else np.nan
+        yoy = pd.to_numeric(pd.Series([df.at[r, yoy_col]]), errors="coerce").iloc[0] if yoy_col is not None else np.nan
+        prev_chg = ((latest - prev) / abs(prev) * 100) if prev not in (0, np.nan) and not pd.isna(prev) else np.nan
+        yoy_chg = ((latest - yoy) / abs(yoy) * 100) if yoy not in (0, np.nan) and not pd.isna(yoy) else np.nan
+        out.append({
+            "Line Item": str(r),
+            f"Latest ({_statement_period_label(latest_col)})": _fmt_statement_value(latest),
+            f"Previous ({_statement_period_label(prev_col)})" if prev_col is not None else "Previous": _fmt_statement_value(prev),
+            "Change vs Previous": _fmt_statement_change(prev_chg),
+            f"Same Period Last Year ({_statement_period_label(yoy_col)})" if yoy_col is not None else "Same Period Last Year": _fmt_statement_value(yoy),
+            "YoY Change": _fmt_statement_change(yoy_chg),
+        })
+    return pd.DataFrame(out)
+
+
+def render_financial_statement_table(title, stmt, rows, quarterly=True, expanded=True):
+    with st.expander(title, expanded=expanded):
+        table = build_statement_comparison(stmt, rows, quarterly=quarterly)
+        if table.empty:
+            st.info("Financial statement data is unavailable for this ticker from Yahoo Finance.")
+            return
+        st.dataframe(table, use_container_width=True, hide_index=True)
+        if quarterly:
+            st.caption("Previous = prior quarter. Same period last year = same quarter one year ago when available.")
+        else:
+            st.caption("Previous = previous fiscal year. YoY Change compares the latest fiscal year with the previous fiscal year.")
 
 
 def is_intraday_interval(interval):
@@ -1335,9 +4630,50 @@ def score_bar(label, score):
       </div>
     </div>""", unsafe_allow_html=True)
 
+def _series_has_numeric_data(values):
+    try:
+        arr = pd.to_numeric(pd.Series(list(values)), errors="coerce")
+        return bool(arr.notna().any())
+    except Exception:
+        return False
+
+
+def figure_has_displayable_data(fig):
+    """Return False when Plotly has no real points to show for the selected period."""
+    try:
+        if fig is None or not getattr(fig, "data", None):
+            return False
+        for trace in fig.data:
+            # Scatter/Bar/Histogram style traces
+            if hasattr(trace, "y") and trace.y is not None and _series_has_numeric_data(trace.y):
+                return True
+            if hasattr(trace, "x") and trace.x is not None and _series_has_numeric_data(trace.x):
+                # Histograms often only have x-values.
+                if getattr(trace, "type", "") == "histogram":
+                    return True
+            # Candlestick/OHLC traces do not use y directly.
+            for attr in ("close", "open", "high", "low"):
+                vals = getattr(trace, attr, None)
+                if vals is not None and _series_has_numeric_data(vals):
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def no_chart_message(extra=""):
+    msg = "No chart for the period you select."
+    if extra:
+        msg += " " + extra
+    st.info(msg)
+
+
 def pchart(fig, key):
     # Keep Plotly labels clean, remove stray Plotly/Streamlit "undefined" text,
     # and compress intraday axes so hidden non-trading hours do not appear as 00:00 gaps.
+    if not figure_has_displayable_data(fig):
+        no_chart_message("Try a longer period or a different interval.")
+        return
     fig.update_layout(title=dict(text=""), showlegend=False)
     fig.update_xaxes(title=dict(text=""))
     fig.update_yaxes(title=dict(text=""))
@@ -1350,7 +4686,9 @@ def pchart(fig, key):
         </style>""",
         unsafe_allow_html=True,
     )
+    st.markdown('<div class="pro-chart-shell">', unsafe_allow_html=True)
     st.plotly_chart(fig, use_container_width=True, key=key)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 
@@ -1402,7 +4740,7 @@ def _ranking_note(pct, vol20, vol_ratio):
     if vol20 > 55: return "High volatility; suitable for active trading but position size should be smaller."
     if abs(pct) < 0.5 and vol20 < 25: return "Stable move; better for trend confirmation than short-term momentum."
     return "Moderate move; compare with sector and volume confirmation."
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def ranking_snapshot(tickers_tuple, period="3mo"):
     rows=[]
     for t in tickers_tuple:
@@ -1444,7 +4782,66 @@ def ranking_snapshot(tickers_tuple, period="3mo"):
             })
         except Exception: continue
     return pd.DataFrame(rows)
-@st.cache_data(ttl=300, show_spinner=False)
+
+@st.cache_data(ttl=900, show_spinner=False)
+def ai_score_universe(tickers_tuple, period="1y", model="risk_loving"):
+    """Score a universe with the same built-in AI thesis model, grouped by reported industry."""
+    rows = []
+    try:
+        spy_hist = yf.Ticker("SPY").history(period=period, auto_adjust=True)
+    except Exception:
+        spy_hist = pd.DataFrame()
+    for t in tickers_tuple:
+        try:
+            y = yf.Ticker(t)
+            h = y.history(period=period, auto_adjust=True)
+            if h is None or h.empty or len(h) < 35:
+                continue
+            try:
+                inf = y.get_info()
+            except Exception:
+                inf = {}
+            hta = calc_ta(h)
+            risk = calc_risk(h, spy_hist)
+            scores = score_from_metrics(inf, risk, hta, model=model)
+            close = h["Close"].dropna()
+            last_price = safe_float(close.iloc[-1], 0) if len(close) else 0
+            ret_3m = 0.0
+            if len(close) > 63 and close.iloc[-64]:
+                ret_3m = (close.iloc[-1] / close.iloc[-64] - 1) * 100
+            rows.append({
+                "Ticker": t,
+                "Company": str(inf.get("shortName") or inf.get("longName") or t)[:46],
+                "Sector": inf.get("sector") or "Unknown",
+                "Industry": inf.get("industry") or "Unknown",
+                "Country": inf.get("country") or "Unknown",
+                "Market Cap $B": round(safe_float(inf.get("marketCap"), 0) / 1e9, 2),
+                "Last Price": round(last_price, 2),
+                "AI Score": scores.get("overall_score", 0),
+                "Recommendation": scores.get("recommendation_model", "Hold"),
+                "Model": scores.get("model_name", AI_RISK_MODEL_NAMES.get(model, model)),
+                "Growth": scores.get("growth_score", 0),
+                "Momentum": scores.get("momentum_score", 0),
+                "Quality": scores.get("quality_score", 0),
+                "Valuation": scores.get("valuation_score", 0),
+                "Risk Score": scores.get("risk_score", 0),
+                "3M Return %": round(ret_3m, 2),
+                "Sharpe": risk.get("sharpe", 0),
+                "Max Drawdown %": risk.get("max_dd", 0),
+                "Annual Vol %": risk.get("vol", 0),
+                "Why It Scores This Way": (
+                    f"Growth {scores.get('growth_score', 0)}/100 and momentum {scores.get('momentum_score', 0)}/100 "
+                    f"are scored under the {AI_RISK_MODEL_NAMES.get(model, model)} model; quality {scores.get('quality_score', 0)}/100, "
+                    f"valuation {scores.get('valuation_score', 0)}/100, and risk {scores.get('risk_score', 0)}/100 adjust the final score."
+                ),
+            })
+        except Exception:
+            continue
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values(["Industry", "AI Score"], ascending=[True, False]).reset_index(drop=True)
+    return df
+@st.cache_data(ttl=1800, show_spinner=False)
 def index_snapshot(period="1mo"):
     rows = []
     curves = {}
@@ -1480,7 +4877,7 @@ def index_snapshot(period="1mo"):
         df = df.sort_values("Order").drop(columns=["Order"]).reset_index(drop=True)
     return df, curves
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def commodity_snapshot(period="3mo"):
     rows = []
     curves = {}
@@ -1551,6 +4948,9 @@ def ranking_bar_chart(df, metric, title="", ascending=False):
 
 def clickable_rank_chart(fig, key):
     """Render a ranking bar chart. Clicking a U.S.-listed ticker bar jumps to Overview."""
+    if not figure_has_displayable_data(fig):
+        no_chart_message("No ranking data is available for this filter.")
+        return
     fig.update_layout(title=dict(text=""), showlegend=False, clickmode="event+select")
     fig.update_xaxes(title=dict(text=""))
     fig.update_yaxes(title=dict(text=""))
@@ -1562,6 +4962,7 @@ def clickable_rank_chart(fig, key):
         </style>""",
         unsafe_allow_html=True,
     )
+    st.markdown('<div class="pro-chart-shell">', unsafe_allow_html=True)
     try:
         event = st.plotly_chart(
             fig,
@@ -1575,9 +4976,11 @@ def clickable_rank_chart(fig, key):
             sym = str(pts[0].get("customdata") or pts[0].get("x") or "").strip().upper()
             if sym and all(ch not in sym for ch in ["=", "^", "."]):
                 st.session_state.ticker = sym
+                st.session_state["section_nav"] = "overview"
                 st.rerun()
     except TypeError:
         st.plotly_chart(fig, use_container_width=True, key=key)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 def index_curves_chart(curves):
@@ -1622,7 +5025,7 @@ def main():
         st.markdown("""
         <div style="padding:0.45rem 0 0.75rem;border-bottom:1px solid #1f2937;margin-bottom:0.65rem;">
           <div style="font-size:18px;font-weight:760;color:#e5e7eb;letter-spacing:-0.025em;line-height:1.12;">
-            Stock Analyzer Pro</div>
+            SmartStock</div>
           <div style="font-size:9px;color:#64748b;margin-top:5px;letter-spacing:0.12em;font-weight:650;">
             EQUITY RESEARCH · RISK · NEWS</div>
         </div>""", unsafe_allow_html=True)
@@ -1636,10 +5039,39 @@ def main():
         st.markdown(f'<div style="font-size:10px;color:#475569;text-transform:uppercase;'
                     f'letter-spacing:0.1em;margin:0.2rem 0 0.45rem">{tr("Ticker Symbol")}</div>',
                     unsafe_allow_html=True)
-        ticker_input = st.text_input("ticker_sym", value=st.session_state.ticker,
+        ticker_input = st.text_input("Direct ticker symbol", value=st.session_state.ticker,
                                      placeholder="AAPL, MSFT, TSLA…",
-                                     label_visibility="collapsed").upper().strip()
-        if ticker_input: st.session_state.ticker = ticker_input
+                                     label_visibility="collapsed",
+                                     help="Type a ticker directly, or use company-name search below.").upper().strip()
+        if ticker_input:
+            st.session_state.ticker = ticker_input
+
+        st.markdown('<div style="font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:0.1em;margin:0.6rem 0 0.45rem">Search Company by Name</div>', unsafe_allow_html=True)
+        company_query = st.text_input(
+            "Company keyword search",
+            value=st.session_state.get("company_search_query", ""),
+            placeholder="apple, microsoft, nvidia, service now…",
+            label_visibility="collapsed",
+            key="company_search_query",
+            help="Search by company name or keyword. Results are ordered by market cap when Yahoo provides/enriches market cap.",
+        ).strip()
+        if company_query:
+            search_rows = search_companies_by_keyword(company_query, max_results=12)
+            if search_rows:
+                label_map = {_company_search_label(r): r["Ticker"] for r in search_rows}
+                selected_company = st.selectbox(
+                    "Matching companies",
+                    list(label_map.keys()),
+                    index=0,
+                    label_visibility="collapsed",
+                    key="company_search_dropdown",
+                )
+                if st.button("Use selected company", key="use_company_search_result", use_container_width=True):
+                    st.session_state.ticker = label_map[selected_company]
+                    st.session_state["section_nav"] = "overview"
+                    st.rerun()
+            else:
+                st.caption("No company matches found. Try a broader keyword or type the ticker directly.")
 
         st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
         st.markdown('<div style="font-size:10px;color:#475569;text-transform:uppercase;'
@@ -1685,6 +5117,36 @@ def main():
 
         st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
         st.markdown('<div style="font-size:10px;color:#475569;text-transform:uppercase;'
+                    'letter-spacing:0.1em;margin-bottom:8px">Auto Refresh</div>',
+                    unsafe_allow_html=True)
+        auto_refresh = st.checkbox("Enable auto-refresh", value=False,
+                                   help="Automatically reload data while the app is open. Faster intervals may hit Yahoo Finance rate limits.")
+        refresh_map = {"15 seconds": 15, "30 seconds": 30, "1 minute": 60, "5 minutes": 300}
+        refresh_label = st.selectbox("Refresh speed", list(refresh_map.keys()), index=1,
+                                     label_visibility="collapsed", disabled=not auto_refresh)
+        refresh_seconds = refresh_map[refresh_label]
+        st.session_state["auto_refresh_enabled"] = auto_refresh
+        st.session_state["auto_refresh_seconds"] = refresh_seconds
+
+        if auto_refresh:
+            try:
+                from streamlit_autorefresh import st_autorefresh
+                refresh_count = st_autorefresh(interval=refresh_seconds * 1000, key="data_auto_refresh")
+                # Force new market/news data on scheduled reruns instead of serving stale cache.
+                if refresh_count != st.session_state.get("_last_auto_refresh_count", -1):
+                    st.session_state["_last_auto_refresh_count"] = refresh_count
+                    st.cache_data.clear()
+                st.caption(f"Auto-refreshing every {refresh_seconds}s · refresh #{refresh_count}")
+            except Exception:
+                import streamlit.components.v1 as components
+                components.html(
+                    f"""<script>setTimeout(function(){{window.parent.location.reload();}}, {refresh_seconds * 1000});</script>""",
+                    height=0,
+                )
+                st.caption(f"Auto-refreshing every {refresh_seconds}s")
+
+        st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:10px;color:#475569;text-transform:uppercase;'
                     'letter-spacing:0.1em;margin-bottom:10px">Price Chart Overlays</div>',
                     unsafe_allow_html=True)
         show_bb      = st.checkbox("Bollinger Bands (20, ±2σ)", value=False)
@@ -1719,14 +5181,23 @@ def main():
                 MA_COLORS[ma] = picked_color
 
         st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div style="font-size:10px;color:#475569;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px">AI Score Model</div>', unsafe_allow_html=True)
+        render_ai_model_selector("", key="ai_model_sidebar")
+        st.caption(ai_model_description())
+        st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
         st.button("⟳  Analyze", type="primary", use_container_width=True)
+        if st.session_state.get("section_nav", "overview") != "overview":
+            if st.button("← Back to Overview", key="sidebar_back_overview", use_container_width=True):
+                st.session_state["section_nav"] = "overview"
+                st.rerun()
         with st.expander("Data / disclaimer", expanded=False):
             st.markdown('<div style="font-size:10px;color:#334155;line-height:1.7">'
                         'Price data: Yahoo Finance<br>Indicators: ta library<br>'
                         'AI Thesis: built-in rule engine<br>⚠️ Not financial advice.</div>',
                         unsafe_allow_html=True)
 
-    ticker = st.session_state.ticker
+    ticker = str(st.session_state.ticker).upper().strip()
+    st.session_state.ticker = ticker
 
     # ── Fetch ──────────────────────────────────────────────────────
     with st.spinner(f"Fetching {ticker}…"):
@@ -1788,14 +5259,61 @@ def main():
     ms[5].metric("Div Yield",   with_avg(fpct(info.get("dividendYield")) if info.get("dividendYield") else "None", "div_yield", info))
     st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
 
-    # ── TABS ───────────────────────────────────────────────────────
-    tabs = st.tabs([f"  📊  {tr('Overview')}  ", f"  💰  {tr('Valuation')}  ", f"  ⚠️  {tr('Risk')}  ",
-                    f"  🏭  {tr('Industry')}  ", f"  📉  {tr('Technical')}  ", f"  🔁  {tr('Comparison')}  ",
-                    f"  📰  {tr('News')}  ", f"  🤖  {tr('AI Thesis')}  ", f"  🏆  {tr('Market Rankings')}  ",
-                    f"  🛢️  {tr('Commodities')}  ", f"  🌍  {tr('Global Indexes')}  "])
+    # ── PROFESSIONAL SECTION NAVIGATION ────────────────────────────
+    # Tab order: Company → Company AI → Market-wide → Global → Tools
+    SECTION_KEYS = [
+        # ── Company ──────────────────────────────────────────────
+        "overview", "valuation", "risk", "industry", "technical", "comparison",
+        "news",
+        # ── Company AI (stock-specific) ───────────────────────────
+        "ai_thesis", "investor_view",
+        # ── Market-wide ───────────────────────────────────────────
+        "market_news", "market_rankings",
+        # ── Global ────────────────────────────────────────────────
+        "global_indexes", "commodities",
+        # ── Tools ─────────────────────────────────────────────────
+        "bond_calculator", "option_calculator",
+    ]
+    SECTION_LABELS = {
+        "overview":          f"📊 {tr('Overview')}",
+        "valuation":         f"💰 {tr('Valuation')}",
+        "risk":              f"⚠️ {tr('Risk')}",
+        "industry":          f"🏭 {tr('Industry')}",
+        "technical":         f"📉 {tr('Technical')}",
+        "comparison":        f"🔁 {tr('Comparison')}",
+        "news":              f"📰 {tr('Company News')}",
+        "ai_thesis":         f"🤖 {tr('AI Thesis')}",
+        "investor_view":     f"🧠 {tr('Investor View')}",
+        "market_news":       f"🌐 {tr('Market News')}",
+        "market_rankings":   f"🏆 {tr('Market Rankings')}",
+        "global_indexes":    f"🌍 {tr('Global Indexes')}",
+        "commodities":       f"🛢️ {tr('Commodities')}",
+        "bond_calculator":   "🧾 Bond Calculator",
+        "option_calculator": "📐 Option Calculator",
+    }
+    if st.session_state.get("section_nav") not in SECTION_KEYS:
+        st.session_state["section_nav"] = "overview"
 
-    # ══════════ TAB 1 — OVERVIEW ══════════════════════════════════
-    with tabs[0]:
+    if st.session_state.get("section_nav") != "overview":
+        st.markdown('<div class="pro-back-row">', unsafe_allow_html=True)
+        if st.button("← Back to Overview", key="main_back_overview", use_container_width=False):
+            st.session_state["section_nav"] = "overview"
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.markdown('<div class="pro-subnav"><div class="pro-subnav-title">Terminal Navigation</div>', unsafe_allow_html=True)
+    active_tab = st.radio(
+        "Terminal Navigation",
+        SECTION_KEYS,
+        key="section_nav",
+        horizontal=True,
+        label_visibility="collapsed",
+        format_func=lambda k: SECTION_LABELS.get(k, k),
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    # ══════════ SECTION 1 — OVERVIEW ═══════════════════════════════
+    if active_tab == "overview":
         shead("Price Chart")
 
         # Build legend for price chart
@@ -1862,7 +5380,7 @@ def main():
         page_comment("Reading this page", ["<b>Price trend:</b> rising price above MA20/MA50 usually confirms near-term momentum; a break below them can mean trend weakness.", "<b>Volume:</b> rising volume during a move gives stronger confirmation than price movement alone.", "<b>Fundamentals:</b> margins, growth, debt, and cash flow should be read together; one strong number does not make the stock low-risk."])
 
     # ══════════ TAB 2 — VALUATION ═════════════════════════════════
-    with tabs[1]:
+    if active_tab == "valuation":
         pe=info.get("trailingPE"); fpe=info.get("forwardPE")
         pb=info.get("priceToBook"); ps=info.get("priceToSalesTrailing12Months")
         peg=info.get("pegRatio"); evE=info.get("enterpriseToEbitda"); evR=info.get("enterpriseToRevenue")
@@ -1973,10 +5491,50 @@ def main():
         q5.metric("Op Margin",    with_avg(fpct(info.get("operatingMargins")), "op_margin", info))
         q6.metric("Rev Growth",   with_avg(fpct(info.get("revenueGrowth")), "rev_growth", info))
 
-        page_comment("Reading this page", ["<b>P/E, P/S, EV/EBITDA:</b> lower can be cheaper, but high-growth firms often trade above industry averages.", "<b>PEG:</b> around 1 is often reasonable; far above 2 can mean price is rich relative to growth.", "<b>DCF:</b> highly sensitive to growth, WACC, and terminal assumptions; use it as a scenario tool, not a precise target.", "<b>ROE / margins:</b> higher usually signals stronger quality, but check debt and business cyclicality."])
+        shead("Financial Reports")
+        st.caption("Access the three major statements directly inside valuation. Comparisons use the newest available Yahoo Finance statement data.")
+        stmt_mode = st.radio("Statement period", ["Quarterly", "Annual"], horizontal=True, index=0, key="financial_statement_mode")
+        with st.spinner(f"Loading {ticker} financial reports..."):
+            reports, reports_err = fetch_financial_reports(ticker)
+        if reports_err:
+            st.warning(f"Could not load financial reports: {reports_err}")
+        quarterly_mode = stmt_mode == "Quarterly"
+        if quarterly_mode:
+            income_stmt = reports.get("Quarterly Income Statement")
+            balance_stmt = reports.get("Quarterly Balance Sheet")
+            cash_stmt = reports.get("Quarterly Cash Flow")
+        else:
+            income_stmt = reports.get("Annual Income Statement")
+            balance_stmt = reports.get("Annual Balance Sheet")
+            cash_stmt = reports.get("Annual Cash Flow")
+
+        income_rows = [
+            "Total Revenue", "Operating Revenue", "Cost Of Revenue", "Gross Profit",
+            "Operating Expense", "Operating Income", "EBITDA", "EBIT",
+            "Interest Expense", "Pretax Income", "Tax Provision", "Net Income",
+            "Diluted EPS", "Basic EPS", "Diluted Average Shares", "Basic Average Shares"
+        ]
+        balance_rows = [
+            "Total Assets", "Current Assets", "Cash And Cash Equivalents",
+            "Cash Cash Equivalents And Short Term Investments", "Accounts Receivable",
+            "Inventory", "Total Liabilities Net Minority Interest", "Current Liabilities",
+            "Total Debt", "Net Debt", "Stockholders Equity", "Retained Earnings",
+            "Working Capital", "Tangible Book Value", "Ordinary Shares Number"
+        ]
+        cash_rows = [
+            "Operating Cash Flow", "Free Cash Flow", "Capital Expenditure",
+            "Investing Cash Flow", "Financing Cash Flow", "Repayment Of Debt",
+            "Issuance Of Debt", "Repurchase Of Capital Stock", "Cash Dividends Paid",
+            "End Cash Position", "Changes In Cash"
+        ]
+        render_financial_statement_table("Income Statement", income_stmt, income_rows, quarterly=quarterly_mode, expanded=True)
+        render_financial_statement_table("Balance Sheet", balance_stmt, balance_rows, quarterly=quarterly_mode, expanded=False)
+        render_financial_statement_table("Cash Flow Statement", cash_stmt, cash_rows, quarterly=quarterly_mode, expanded=False)
+
+        page_comment("Reading this page", ["<b>P/E, P/S, EV/EBITDA:</b> lower can be cheaper, but high-growth firms often trade above industry averages.", "<b>PEG:</b> around 1 is often reasonable; far above 2 can mean price is rich relative to growth.", "<b>DCF:</b> highly sensitive to growth, WACC, and terminal assumptions; use it as a scenario tool, not a precise target.", "<b>Financial reports:</b> revenue, net income, debt, and free cash flow trends matter more when they improve versus both the previous period and the same period last year.", "<b>ROE / margins:</b> higher usually signals stronger quality, but check debt and business cyclicality."])
 
     # ══════════ TAB 3 — RISK ══════════════════════════════════════
-    with tabs[2]:
+    if active_tab == "risk":
         rcfg1, rcfg2 = st.columns([1, 4])
         risk_chart_period = rcfg1.selectbox("Risk chart range", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "20y"], index=1, key="risk_chart_period")
         rcfg2.caption("Risk charts use their own range. Default is 3 months.")
@@ -1986,24 +5544,25 @@ def main():
             risk_ta_local = calc_ta(risk_hist_local)
             risk_spy_local = fetch_spy(risk_chart_period)
             risk_view = calc_risk(risk_hist_local, risk_spy_local)
+        risk_metric = risk_view
 
         shead("Risk & Performance Metrics vs S&P 500")
         r1,r2,r3,r4,r5,r6,r7=st.columns(7)
-        r1.metric("Beta",         with_avg(f"{risk['beta']:.2f}", "beta", info))
-        r2.metric("Annual Vol.",  with_avg(f"{risk['vol']:.1f}%", "vol", info))
-        r3.metric("Sharpe Ratio", with_avg(f"{risk['sharpe']:.2f}", "sharpe", info))
-        r4.metric("Sortino",      with_avg(f"{risk['sortino']:.2f}", "sortino", info))
-        r5.metric("Max Drawdown", with_avg(f"{risk['max_dd']:.1f}%", "max_dd", info))
-        r6.metric("Calmar Ratio", with_avg(f"{risk['calmar']:.2f}", "calmar", info))
-        r7.metric("1yr Return",   f"{risk['ret1y']:.1f}%")
+        r1.metric("Beta",         with_avg(f"{risk_metric['beta']:.2f}", "beta", info))
+        r2.metric("Annual Vol.",  with_avg(f"{risk_metric['vol']:.1f}%", "vol", info))
+        r3.metric("Sharpe Ratio", with_avg(f"{risk_metric['sharpe']:.2f}", "sharpe", info))
+        r4.metric("Sortino",      with_avg(f"{risk_metric['sortino']:.2f}", "sortino", info))
+        r5.metric("Max Drawdown", with_avg(f"{risk_metric['max_dd']:.1f}%", "max_dd", info))
+        r6.metric("Calmar Ratio", with_avg(f"{risk_metric['calmar']:.2f}", "calmar", info))
+        r7.metric("1yr Return",   f"{risk_metric['ret1y']:.1f}%")
         r8,r9,r10,r11,r12,r13,r14=st.columns(7)
-        r8.metric("Alpha vs SPY", f"{risk['alpha']:.2f}%")
-        r9.metric("VaR 95%",      with_avg(f"{risk['var95']:.2f}%", "var95", info))
-        r10.metric("CVaR 95%",    with_avg(f"{risk['cvar95']:.2f}%", "cvar95", info))
-        r11.metric("Win Rate",    with_avg(f"{risk['win']:.1f}%", "win", info))
-        r12.metric("R² vs SPY",   with_avg(f"{risk['r2']:.3f}", "r2", info))
-        r13.metric("Tracking Err",with_avg(f"{risk['te']:.2f}%", "te", info))
-        r14.metric("Info Ratio",  with_avg(f"{risk['ir']:.2f}", "ir", info))
+        r8.metric("Alpha vs SPY", f"{risk_metric['alpha']:.2f}%")
+        r9.metric("VaR 95%",      with_avg(f"{risk_metric['var95']:.2f}%", "var95", info))
+        r10.metric("CVaR 95%",    with_avg(f"{risk_metric['cvar95']:.2f}%", "cvar95", info))
+        r11.metric("Win Rate",    with_avg(f"{risk_metric['win']:.1f}%", "win", info))
+        r12.metric("R² vs SPY",   with_avg(f"{risk_metric['r2']:.3f}", "r2", info))
+        r13.metric("Tracking Err",with_avg(f"{risk_metric['te']:.2f}%", "te", info))
+        r14.metric("Info Ratio",  with_avg(f"{risk_metric['ir']:.2f}", "ir", info))
 
         ca,cb=st.columns(2)
         with ca:
@@ -2042,7 +5601,7 @@ def main():
         page_comment("Reading this page", ["<b>Sharpe ratio:</b> above 1 is generally good; above 2 is strong; below 0 means risk-adjusted return is poor over the selected period.", "<b>Beta:</b> above 1 moves more than SPY on average; below 1 is usually more defensive.", "<b>Max drawdown:</b> shows worst peak-to-trough loss; smaller drawdown is better for capital preservation.", "<b>VaR / CVaR:</b> estimate downside tail risk; CVaR is the average loss in the worst tail, so it is usually more conservative."])
 
     # ══════════ TAB 4 — INDUSTRY ══════════════════════════════════
-    with tabs[3]:
+    if active_tab == "industry":
         shead("Market Position")
         s1,s2,s3,s4=st.columns(4)
         mcap=info.get("marketCap",0) or 0
@@ -2106,7 +5665,7 @@ def main():
         page_comment("Reading this page", ["<b>Peer comparison:</b> compare companies in the same sector first; cross-sector valuation comparisons can be misleading.", "<b>Normalized performance:</b> base = 100 lets you compare relative returns independent of starting price.", "<b>Market cap:</b> larger firms are often more liquid and stable; smaller firms may move faster but carry more risk."])
 
     # ══════════ TAB 5 — TECHNICAL ═════════════════════════════════
-    with tabs[4]:
+    if active_tab == "technical":
         tcfg1, tcfg2 = st.columns([1, 4])
         tech_chart_period = tcfg1.selectbox("Technical chart range", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "20y"], index=1, key="tech_chart_period")
         tcfg2.caption("Technical indicators and charts use their own range. Default is 3 months.")
@@ -2116,43 +5675,20 @@ def main():
             tech_ta = calc_ta(tech_hist_local)
             tech_days = 99999
 
-        last    = tech_ta.iloc[-1]
-        rsi_v   = float(last.get("RSI",   50) or 50)
-        adx_v   = float(last.get("ADX",    0) or 0)
-        atr_v   = float(last.get("ATR",    0) or 0)
-        macd_v  = float(last.get("MACD",   0) or 0)
-        msig_v  = float(last.get("MACD_SIG",0) or 0)
-        ma20_v  = float(last.get("MA20", price) or price)
-        ma50_v  = float(last.get("MA50", price) or price)
-        ma200_v = float(last.get("MA200",price) or price)
-        stk_k   = float(last.get("STOCH_K",50) or 50)
-        rvol    = float(last.get("RVOL20",  0) or 0)
+        last = tech_ta.iloc[-1]
+        tech_price = _finite(last.get("Close"))
+        if not np.isfinite(tech_price):
+            tech_price = price
+        rsi_v = _finite(last.get("RSI"));   rsi_v = rsi_v if np.isfinite(rsi_v) else 50.0
+        adx_v = _finite(last.get("ADX"));   adx_v = adx_v if np.isfinite(adx_v) else 0.0
+        atr_v = _finite(last.get("ATR"));   atr_v = atr_v if np.isfinite(atr_v) else 0.0
+        rvol  = _finite(last.get("RVOL20")); rvol = rvol if np.isfinite(rvol) else 0.0
 
-        sigs=[]
-        def s(e,t): sigs.append((e,t))
-        if price>ma20_v:   s("🟢",f"Price above 20-Day MA (${ma20_v:.2f})")
-        else:              s("🔴",f"Price below 20-Day MA (${ma20_v:.2f})")
-        if price>ma50_v:   s("🟢",f"Price above 50-Day MA (${ma50_v:.2f})")
-        else:              s("🔴",f"Price below 50-Day MA (${ma50_v:.2f})")
-        if price>ma200_v:  s("🟢",f"Price above 200-Day MA (${ma200_v:.2f}) — long-term bullish")
-        else:              s("🔴",f"Price below 200-Day MA (${ma200_v:.2f}) — long-term bearish")
-        if ma50_v>ma200_v: s("🟢","Golden Cross: 50-Day MA > 200-Day MA")
-        else:              s("🔴","Death Cross: 50-Day MA < 200-Day MA")
-        if 30<rsi_v<70:    s("🟡",f"RSI {rsi_v:.1f} — neutral zone (30–70)")
-        elif rsi_v>=70:    s("🔴",f"RSI {rsi_v:.1f} — overbought (above 70)")
-        else:              s("🟢",f"RSI {rsi_v:.1f} — oversold (below 30), potential bounce")
-        if macd_v>msig_v:  s("🟢","MACD line above signal line — bullish momentum")
-        else:              s("🔴","MACD line below signal line — bearish momentum")
-        if adx_v>25:       s("🟡",f"ADX {adx_v:.1f} — strong trend present (>25)")
-        else:              s("🟡",f"ADX {adx_v:.1f} — weak / ranging market (<25)")
-        if stk_k<20:       s("🟢",f"Stochastic %K {stk_k:.1f} — oversold (below 20)")
-        elif stk_k>80:     s("🔴",f"Stochastic %K {stk_k:.1f} — overbought (above 80)")
-        else:              s("🟡",f"Stochastic %K {stk_k:.1f} — neutral")
-
-        score=sum(1 for e,_ in sigs if e=="🟢")/len(sigs)*100
-        vt=("Strongly Bullish" if score>=80 else "Bullish" if score>=60
-            else "Neutral" if score>=40 else "Bearish" if score>=20 else "Strongly Bearish")
-        vc=GREEN if score>=60 else RED if score<40 else AMBER
+        tech_signal = technical_signal_model(tech_ta, fallback_price=tech_price)
+        score = tech_signal["score"]
+        vt = tech_signal["label"]
+        vc = tech_signal["color"]
+        sigs = [(c["emoji"], f"{c['name']} ({c['weight']:.0f}% weight): {c['detail']}") for c in tech_signal.get("components", [])]
 
         shead("Technical Summary")
         ts1,ts2,ts3,ts4,ts5=st.columns(5)
@@ -2174,7 +5710,7 @@ def main():
         for i,lbl in enumerate(["MA5","MA10","MA20","MA50","MA120","MA200"]):
             raw=last.get(lbl)
             if raw is not None and not pd.isna(raw):
-                mav=float(raw); dp2=(price/mav-1)*100; clr=GREEN if dp2>0 else RED
+                mav=float(raw); dp2=(tech_price/mav-1)*100; clr=GREEN if dp2>0 else RED
                 ma_cols[i].markdown(f"""
                 <div style="background:#13161e;border:1px solid #1e2433;border-radius:9px;
                             padding:12px;text-align:center">
@@ -2191,7 +5727,7 @@ def main():
         supports,resistances=find_sr(tech_ta)
         src=st.columns(6)
         for i,sv in enumerate(supports[:3]):
-            diff=(price/sv-1)*100
+            diff=(tech_price/sv-1)*100
             src[i].markdown(f"""
             <div style="background:#13161e;border:1px solid rgba(239,68,68,0.25);
                         border-radius:9px;padding:12px;text-align:center">
@@ -2201,7 +5737,7 @@ def main():
               <div style="font-size:11px;color:{RED};margin-top:2px">{diff:+.1f}% from price</div>
             </div>""", unsafe_allow_html=True)
         for i,rv in enumerate(resistances[:3]):
-            diff=(price/rv-1)*100
+            diff=(tech_price/rv-1)*100
             src[i+3].markdown(f"""
             <div style="background:#13161e;border:1px solid rgba(16,185,129,0.25);
                         border-radius:9px;padding:12px;text-align:center">
@@ -2254,10 +5790,10 @@ def main():
             target=sc1 if i%2==0 else sc2
             target.markdown(f'<div class="signal-row">{emoji} {text}</div>', unsafe_allow_html=True)
 
-        page_comment("Reading this page", ["<b>RSI:</b> above 70 is often overbought; below 30 is often oversold, but strong trends can stay extreme.", "<b>MACD:</b> MACD above signal is bullish momentum; crossing below signal is weakening momentum.", "<b>ADX:</b> above 25 suggests a stronger trend; ADX does not tell direction, only trend strength.", "<b>ATR / volatility:</b> higher means wider expected price swings and usually requires smaller position size."])
+        page_comment("Reading this page", ["<b>Overall signal:</b> weighted model, not a simple green-icon count. Trend structure and MACD carry the most weight; RSI/stochastic help detect overextension.", "<b>RSI:</b> above 70 is often overbought; below 30 is oversold, but oversold is not automatically bullish until reversal/trend confirmation appears.", "<b>MACD:</b> MACD above signal is bullish momentum; histogram improvement confirms acceleration.", "<b>ADX:</b> above 25 confirms trend strength; the model combines ADX with MA direction because ADX alone has no bullish/bearish direction.", "<b>ATR / volatility:</b> higher means wider expected price swings and usually requires smaller position size."])
 
     # ══════════ TAB 6 — COMPARISON ═══════════════════════════════
-    with tabs[5]:
+    if active_tab == "comparison":
         shead("Two-Stock Direct Comparison")
         cta, ctb, ctc = st.columns([2,2,1])
         comp1 = cta.text_input("First ticker", value=ticker, key="comp_ticker_1").upper().strip()
@@ -2293,8 +5829,8 @@ def main():
         page_comment("Reading this page", ["<b>Direct comparison:</b> a better candidate usually has stronger trend, lower valuation risk, better profitability, and acceptable volatility.", "<b>Volatility:</b> the more volatile ticker may offer better trading opportunity but needs stricter risk control.", "<b>Ratios:</b> compare against the firm’s industry average, not only against the second ticker."])
 
     # ══════════ TAB 7 — NEWS ═══════════════════════════════════════
-    with tabs[6]:
-        shead("Latest Stock / Company News")
+    if active_tab == "news":
+        shead("Latest Company News")
         ncol1, ncol2, ncol3 = st.columns([2, 2, 1])
         news_keyword = ncol1.text_input(tr("Search news by keyword"), value="", placeholder="earnings, AI, guidance, lawsuit...", key="news_keyword")
         news_order = ncol2.selectbox(tr("Order news by"), [tr("Importance first"), tr("Newest first")], index=0, key="news_order")
@@ -2328,8 +5864,70 @@ def main():
 
         page_comment("Reading this page", ["<b>News sentiment:</b> positive/negative/neutral is a quick classification; price reaction still depends on valuation and expectations.", "<b>Influence score:</b> higher means the headline is more likely to matter for near-term trading.", "<b>Duplicate filter:</b> similar headlines are compressed so the page focuses on important catalysts."])
 
+
+    # ══════════ TAB 8 — BROAD MARKET NEWS ════════════════════════
+    if active_tab == "market_news":
+        shead("Latest Market News")
+        st.caption(tr("Market news by importance/time with AI-style impact analysis. Sources prioritize yfinance/Yahoo Finance and WSJ first, then reliable broad RSS discovery."))
+        if "market_news_refresh_token" not in st.session_state:
+            st.session_state.market_news_refresh_token = 0
+
+        m1, m2, m3, m4, m5, m6 = st.columns([1.35, .95, 1.05, 1.05, 1.05, .75])
+        market_keyword = m1.text_input(tr("Search market news by keyword"), value="", placeholder="Hormuz, Fed, AI, tariffs, earnings...", key="market_news_keyword")
+        market_ticker = m2.text_input(tr("Search market news by ticker"), value="", placeholder="AAPL, NOW, NVDA...", key="market_news_ticker").upper().strip()
+        market_order = m3.selectbox(tr("Order by"), ["Importance first", "Newest first"], index=0, key="market_news_order", format_func=tr)
+        market_country = m4.selectbox(tr("Country Filter"), MARKET_NEWS_COUNTRIES, index=0, key="market_news_country", format_func=tr)
+        market_category = m5.selectbox(tr("Category Filter"), MARKET_NEWS_CATEGORIES, index=0, key="market_news_category", format_func=tr)
+        if m6.button("⟳ " + tr("Update"), key="market_news_update", use_container_width=True):
+            st.session_state.market_news_refresh_token = int(time.time())
+            fetch_market_news.clear()
+
+        f1, f2 = st.columns([1.2, 2.8])
+        market_industry = f1.selectbox(tr("Industry Impact Filter"), MARKET_NEWS_INDUSTRIES, index=0, key="market_news_industry", format_func=tr)
+        max_items = f2.slider(tr("Number of headlines"), min_value=8, max_value=40, value=20, step=4, key="market_news_limit")
+
+        with st.spinner("Updating global and U.S. market news, scoring importance, and mapping industry impact..."):
+            market_items = fetch_market_news(market_keyword, market_ticker, st.session_state.market_news_refresh_token)
+
+        if market_country != "All Countries":
+            market_items = [x for x in market_items if x.get("country") == market_country]
+        if market_category != "All Categories":
+            market_items = [x for x in market_items if x.get("category") == market_category]
+        if market_industry != "All Industries":
+            key = market_industry.lower().split(" /")[0]
+            market_items = [x for x in market_items if key in " ".join(x.get("industry_tags", []) + x.get("impact", {}).get("good_for", []) + x.get("impact", {}).get("bad_for", []) + x.get("impact", {}).get("companies", [])).lower()]
+
+        if market_order == "Newest first":
+            market_items = sorted(market_items, key=lambda x: x.get("ts", 0), reverse=True)
+        else:
+            market_items = sorted(market_items, key=lambda x: (x.get("importance", 0), x.get("ts", 0)), reverse=True)
+        market_items = market_items[:max_items]
+
+        if not market_items:
+            st.info(tr("No broad market news matched these filters. Try a broader keyword, ticker, country, category, or industry filter."))
+        else:
+            avg_score = sum(x.get("importance", 0) for x in market_items) / max(1, len(market_items))
+            policy_count = sum(1 for x in market_items if x.get("category") in {"Policy / Regulation", "Central Bank / Rates", "Geopolitics / Conflict"})
+            global_count = sum(1 for x in market_items if x.get("country") != "United States")
+            top_theme = market_items[0].get("category", "General Market News")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Headlines", len(market_items))
+            c2.metric("Avg Importance", f"{avg_score:.0f}/100")
+            c3.metric("Global Items", global_count)
+            c4.metric("Top Theme", top_theme)
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+            for item in market_items:
+                render_market_news_item(item)
+
+        page_comment("Reading this page", ["<b>Importance score:</b> ranks event materiality using source priority, category, macro shock keywords, and identified industry/company impact.", "<b>AI-style summary:</b> concise headline and body are generated locally with rules, so no external AI key is required.", "<b>Impact list:</b> good/bad industry mapping is a trading screen, not a guarantee; confirm with price action, volume, and official filings."])
+
+
+    # ══════════ TAB 8B — INVESTOR VIEW ═══════════════════════════
+    if active_tab == "investor_view":
+        render_investor_view()
+
     # ══════════ TAB 9 — MARKET RANKINGS ═══════════════════════════
-    with tabs[8]:
+    if active_tab == "market_rankings":
         shead("Market Movers & Volatility Ranking")
         c1, c2, c3, c4 = st.columns([2, 1, 2, 1])
         industry_choice = c1.selectbox(tr("Industry Filter"), list(RANKING_UNIVERSES.keys()), index=0, key="rank_industry")
@@ -2399,10 +5997,58 @@ def main():
                 <div class="news-card"><div class="news-title">{tr('Investment Note')}</div>
                 <div class="news-summary"><b>{leader['Ticker']}</b> is the <b>{direction_label.lower()}</b> result in this filtered ranking by <b>{metric}</b>. The composite score combines price move, volatility, volume confirmation, five-day momentum, and liquidity. For trades, prioritize names with high volume confirmation and clear catalysts; for investing, confirm valuation, earnings quality, balance-sheet strength, and sector trend before acting.</div></div>""", unsafe_allow_html=True)
 
-                page_comment("Reading this page", ["<b>% change:</b> best for ranking short-term market movers across tickers.", "<b>20D volatility:</b> high volatility means larger daily swings; combine it with volume ratio before trading.", "<b>Dollar volume:</b> higher liquidity usually means tighter spreads and easier execution.", "<b>Composite score:</b> blends move size, momentum, volume, volatility, and liquidity for trader-focused screening."])
+
+                shead("AI Thesis Score by Industry / Country")
+                ai_c1, ai_c2, ai_c3, ai_c4, ai_c5 = st.columns([1.15, 0.9, 0.95, 1.25, 0.85])
+                ai_universe_choice = ai_c1.selectbox("AI score universe", list(RANKING_UNIVERSES.keys()), index=list(RANKING_UNIVERSES.keys()).index(industry_choice) if industry_choice in RANKING_UNIVERSES else 0, key="ai_rank_universe")
+                ai_top_n = ai_c2.selectbox("Top per industry", [5, 10, 20], index=1, key="ai_rank_top_n")
+                ai_direction = ai_c3.selectbox("Score direction", ["High to Low", "Low to High"], index=0, key="ai_score_direction")
+                with ai_c4:
+                    ai_model = render_ai_model_selector("Risk preference model", key="ai_model_market_rank")
+                if ai_c5.button("Update AI Scores", key="update_ai_rankings", use_container_width=True):
+                    st.cache_data.clear()
+                st.caption(ai_model_description(ai_model))
+                with st.spinner(f"Scoring companies with {AI_RISK_MODEL_NAMES.get(ai_model, ai_model)} model... This checks growth, momentum, quality, valuation, and risk for each ticker."):
+                    ai_df = ai_score_universe(tuple(RANKING_UNIVERSES[ai_universe_choice]), period="1y", model=ai_model)
+                if ai_df.empty:
+                    st.info("No AI score data is available for this universe right now.")
+                else:
+                    f1, f2 = st.columns([1, 1])
+                    ai_countries = ["All"] + sorted([x for x in ai_df["Country"].dropna().unique().tolist() if x])
+                    ai_country_filter = f1.selectbox("Show country", ai_countries, index=0, key="ai_country_filter")
+                    ai_industries = ["All"] + sorted([x for x in ai_df["Industry"].dropna().unique().tolist() if x])
+                    ai_industry_filter = f2.selectbox("Show industry group", ai_industries, index=0, key="ai_industry_filter")
+                    ai_view = ai_df.copy()
+                    if ai_country_filter != "All":
+                        ai_view = ai_view[ai_view["Country"] == ai_country_filter]
+                    if ai_industry_filter != "All":
+                        ai_view = ai_view[ai_view["Industry"] == ai_industry_filter]
+                    ai_ascending = ai_direction == "Low to High"
+                    # First select top/bottom N within each country-industry bucket.
+                    # Then display the final table in true global score order, so High to Low
+                    # never places a lower AI Score above a higher AI Score.
+                    ai_view = (
+                        ai_view
+                        .sort_values("AI Score", ascending=ai_ascending)
+                        .groupby(["Country", "Industry"], group_keys=False, sort=False)
+                        .head(int(ai_top_n))
+                        .sort_values("AI Score", ascending=ai_ascending)
+                        .reset_index(drop=True)
+                    )
+                    ai_cols = ["Country", "Industry", "Ticker", "Company", "Market Cap $B", "Last Price", "AI Score", "Recommendation", "Model", "Growth", "Momentum", "Quality", "Valuation", "Risk Score", "3M Return %", "Sharpe", "Max Drawdown %", "Annual Vol %", "Why It Scores This Way"]
+                    st.caption("Sorted globally by AI Score. Country and industry columns show each company’s group; Top per industry still limits how many names can come from each country-industry bucket.")
+                    st.dataframe(ai_view[[c for c in ai_cols if c in ai_view.columns]], use_container_width=True, hide_index=True)
+                    if not ai_view.empty:
+                        top_ai = ai_view.sort_values("AI Score", ascending=ai_ascending).iloc[0]
+                        headline = "Lowest AI thesis score" if ai_ascending else "Highest AI thesis score"
+                        st.markdown(f"""
+                        <div class="news-card"><div class="news-title">{headline}: {top_ai['Ticker']} · {top_ai['AI Score']}/100 · {top_ai['Country']}</div>
+                        <div class="news-summary">This list keeps country and industry labels, limits results per country-industry bucket, and is globally sorted {ai_direction.lower()} by your risk-lover AI thesis score. Growth and momentum receive the highest weight, quality and valuation act as secondary filters, and safety/risk is a smaller but still active penalty.</div></div>""", unsafe_allow_html=True)
+
+                page_comment("Reading this page", ["<b>% change:</b> best for ranking short-term market movers across tickers.", "<b>20D volatility:</b> high volatility means larger daily swings; combine it with volume ratio before trading.", "<b>Dollar volume:</b> higher liquidity usually means tighter spreads and easier execution.", "<b>Composite score:</b> blends move size, momentum, volume, volatility, and liquidity for trader-focused screening.", "<b>AI thesis score:</b> ranks companies by your preferred style: growth and momentum first, then quality/valuation, then risk control."])
 
     # ══════════ TAB 11 — GLOBAL INDEXES ═════════════════════════════
-    with tabs[10]:
+    if active_tab == "global_indexes":
         shead("Global Index Performance")
         ic1, ic2 = st.columns([1, 1])
         index_period = ic1.selectbox("Index period", ["5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y"], index=2, key="index_period")
@@ -2445,7 +6091,7 @@ def main():
             page_comment("Reading this page", ["<b>Global indexes:</b> U.S. and China are shown first by default because they often drive global risk sentiment.", "<b>Percentage ranking:</b> helps identify which region is leading or lagging over the selected period.", "<b>Index volatility:</b> rising volatility can signal stress even if the index is not down much yet."])
 
     # ══════════ TAB 10 — COMMODITIES ═══════════════════════════════
-    with tabs[9]:
+    if active_tab == "commodities":
         shead("Commodity Dashboard")
         cm1, cm2 = st.columns([1, 1])
         commodity_period = cm1.selectbox("Commodity period", ["5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y"], index=2, key="commodity_period")
@@ -2493,108 +6139,206 @@ def main():
 
             page_comment("Reading this page", ["<b>Oil and gas:</b> usually react to demand, supply cuts, inventories, and geopolitics.", "<b>Gold and silver:</b> often react to rates, inflation expectations, dollar strength, and risk demand.", "<b>RSI / MA20 / MA50:</b> use them to judge whether a commodity move is stretched or trend-confirmed."])
 
+
+
+    # ══════════ TAB 12 — BOND / COUPON CALCULATOR ═════════════════
+    if active_tab == "bond_calculator":
+        shead("Bond / Coupon Calculator")
+        st.markdown("<div style='font-size:12px;color:#64748b;margin-bottom:12px'>Price a coupon bond, estimate yield sensitivity, duration, convexity, and key decision metrics.</div>", unsafe_allow_html=True)
+        b1, b2, b3, b4, b5 = st.columns(5)
+        face = b1.number_input("Face Value", min_value=1.0, value=1000.0, step=100.0, key="bond_face")
+        coupon_rate = b2.number_input("Coupon Rate %", min_value=0.0, max_value=30.0, value=5.0, step=0.25, key="bond_coupon") / 100
+        ytm = b3.number_input("Yield to Maturity %", min_value=0.0, max_value=40.0, value=5.5, step=0.25, key="bond_ytm") / 100
+        years = b4.number_input("Years to Maturity", min_value=0.1, max_value=50.0, value=10.0, step=0.5, key="bond_years")
+        freq_label = b5.selectbox("Coupon Frequency", ["Annual", "Semiannual", "Quarterly", "Monthly"], index=1, key="bond_freq")
+        freq = {"Annual": 1, "Semiannual": 2, "Quarterly": 4, "Monthly": 12}[freq_label]
+
+        price_b = bond_price(face, coupon_rate, ytm, years, freq)
+        mac_dur, mod_dur, conv = bond_duration_convexity(face, coupon_rate, ytm, years, freq)
+        current_yield = (face * coupon_rate / price_b) if price_b else 0
+        premium_discount = "Premium" if price_b > face else "Discount" if price_b < face else "Par"
+        approx_100bp = -mod_dur * 0.01 * price_b + 0.5 * conv * (0.01 ** 2) * price_b
+
+        m1, m2, m3, m4, m5, m6 = st.columns(6)
+        m1.metric("Estimated Bond Price", f"${price_b:,.2f}")
+        m2.metric("Premium / Discount", premium_discount)
+        m3.metric("Current Yield", f"{current_yield*100:.2f}%")
+        m4.metric("Macaulay Duration", f"{mac_dur:.2f} yrs")
+        m5.metric("Modified Duration", f"{mod_dur:.2f}")
+        m6.metric("Convexity", f"{conv:.2f}")
+
+        bc1, bc2 = st.columns([1.2, 1])
+        with bc1:
+            shead("Price Sensitivity to Yield Changes")
+            pchart(bond_price_sensitivity_chart(face, coupon_rate, ytm, years, freq), "bond_sensitivity_chart")
+        with bc2:
+            shead("Decision Read")
+            st.markdown(f"""
+            <div class="news-card"><div class="news-title">Bond Risk Summary</div>
+            <div class="news-summary">This bond is priced at <b>${price_b:,.2f}</b>, so it trades at a <b>{premium_discount.lower()}</b> versus par. Modified duration of <b>{mod_dur:.2f}</b> means a 1 percentage point rise in yield is roughly associated with a price move of about <b>${approx_100bp:,.2f}</b> per bond after convexity adjustment. Higher duration means more interest-rate risk; higher convexity generally makes the bond more favorable when rates move sharply.</div></div>
+            """, unsafe_allow_html=True)
+            shead("Cash Flow Schedule")
+            st.dataframe(bond_cashflow_table(face, coupon_rate, ytm, min(years, 10), freq), use_container_width=True, hide_index=True)
+        page_comment("Reading this page", ["<b>Bond price:</b> if coupon rate is below YTM, the bond usually trades below par; if coupon is above YTM, it usually trades above par.", "<b>Modified duration:</b> approximate % price change for a 1 percentage point yield move.", "<b>Convexity:</b> improves the duration estimate for larger rate changes.", "<b>Current yield:</b> annual coupon divided by price; it is not the same as YTM."])
+
+    # ══════════ TAB 13 — OPTION CALCULATOR ════════════════════════
+    if active_tab == "option_calculator":
+        shead("Option Calculator")
+        st.markdown("<div style='font-size:12px;color:#64748b;margin-bottom:12px'>Black-Scholes estimate for calls/puts, Greeks, breakeven, intrinsic value, and payoff at expiration.</div>", unsafe_allow_html=True)
+        o1, o2, o3, o4 = st.columns(4)
+        option_type = o1.selectbox("Option Type", ["Call", "Put"], index=0, key="opt_type")
+        default_s = float(price) if price else 100.0
+        S = o2.number_input("Underlying Price", min_value=0.01, value=float(round(default_s, 2)), step=1.0, key="opt_s")
+        K = o3.number_input("Strike Price", min_value=0.01, value=float(round(default_s, 2)), step=1.0, key="opt_k")
+        days_exp = o4.number_input("Days to Expiration", min_value=1, max_value=3650, value=30, step=1, key="opt_days")
+
+        o5, o6, o7, o8 = st.columns(4)
+        iv = o5.number_input("Implied Volatility %", min_value=0.1, max_value=300.0, value=35.0, step=1.0, key="opt_iv") / 100
+        rf_rate = o6.number_input("Risk-Free Rate %", min_value=0.0, max_value=30.0, value=5.0, step=0.25, key="opt_rf") / 100
+        div_yield = o7.number_input("Dividend Yield %", min_value=0.0, max_value=30.0, value=0.0, step=0.25, key="opt_q") / 100
+        contract_qty = o8.number_input("Contracts", min_value=1, max_value=10000, value=1, step=1, key="opt_contracts")
+
+        T = days_exp / 365.0
+        opt = black_scholes(S, K, T, rf_rate, iv, option_type, div_yield)
+        premium = opt["price"]
+        breakeven = K + premium if option_type == "Call" else K - premium
+        total_cost = premium * 100 * contract_qty
+        moneyness = S / K - 1 if option_type == "Call" else K / S - 1
+        prob_itm = _norm_cdf(opt["d2"]) if option_type == "Call" else _norm_cdf(-opt["d2"])
+
+        om1, om2, om3, om4, om5, om6 = st.columns(6)
+        om1.metric("Theoretical Premium", f"${premium:.2f}")
+        om2.metric("Contract Cost", f"${total_cost:,.2f}")
+        om3.metric("Breakeven", f"${breakeven:.2f}")
+        om4.metric("Intrinsic Value", f"${opt['intrinsic']:.2f}")
+        om5.metric("Time Value", f"${opt['time_value']:.2f}")
+        om6.metric("Approx. ITM Probability", f"{prob_itm*100:.1f}%")
+
+        g1, g2, g3, g4, g5 = st.columns(5)
+        g1.metric("Delta", f"{opt['delta']:.3f}")
+        g2.metric("Gamma", f"{opt['gamma']:.4f}")
+        g3.metric("Theta / Day", f"${opt['theta']:.3f}")
+        g4.metric("Vega / 1% IV", f"${opt['vega']:.3f}")
+        g5.metric("Rho / 1% Rate", f"${opt['rho']:.3f}")
+
+        oc1, oc2 = st.columns([1.2, 1])
+        with oc1:
+            shead("Expiration Payoff Curve")
+            pchart(option_payoff_chart(S, K, premium, option_type), "option_payoff_chart")
+        with oc2:
+            shead("Decision Read")
+            direction_note = "bullish" if option_type == "Call" else "bearish / hedge"
+            st.markdown(f"""
+            <div class="news-card"><div class="news-title">Option Risk Summary</div>
+            <div class="news-summary">This <b>{option_type}</b> has a model premium of <b>${premium:.2f}</b> and breakeven at <b>${breakeven:.2f}</b>. Delta of <b>{opt['delta']:.3f}</b> shows directional exposure, while theta of <b>${opt['theta']:.3f}/day</b> shows daily time decay. Vega of <b>${opt['vega']:.3f}</b> means the option is sensitive to implied volatility changes. This is generally a <b>{direction_note}</b> instrument; position sizing matters because one contract controls 100 shares.</div></div>
+            """, unsafe_allow_html=True)
+            st.dataframe(pd.DataFrame([
+                {"Metric": "Moneyness", "Value": f"{moneyness*100:+.2f}%"},
+                {"Metric": "Max Loss for Buyer", "Value": f"${total_cost:,.2f}"},
+                {"Metric": "Share Equivalent Delta", "Value": f"{opt['delta']*100*contract_qty:,.1f} shares"},
+                {"Metric": "Daily Theta Estimate", "Value": f"${opt['theta']*100*contract_qty:,.2f}/day"},
+                {"Metric": "Vega for Position", "Value": f"${opt['vega']*100*contract_qty:,.2f} per 1 IV point"},
+            ]), use_container_width=True, hide_index=True)
+        page_comment("Reading this page", ["<b>Delta:</b> directional exposure; 0.50 call delta behaves roughly like 50 shares per contract.", "<b>Theta:</b> time decay; usually negative for option buyers.", "<b>Vega:</b> sensitivity to implied volatility; high vega benefits if IV rises after entry.", "<b>Breakeven:</b> expiration price needed to cover premium, not a guarantee of profit before expiration."])
+
     # ══════════ TAB 8 — AI THESIS ═════════════════════════════════
-    with tabs[7]:
+    if active_tab == "ai_thesis":
         shead("Built-in AI Investment Thesis")
         st.markdown("""
         <div style="font-size:12px;color:#64748b;margin-bottom:12px">
           This thesis is generated from the dashboard's own valuation, quality, growth,
           momentum, and risk metrics. No Anthropic API key is needed.
         </div>""", unsafe_allow_html=True)
+        ai_model = render_ai_model_selector("Risk preference model", key="ai_model_thesis_tab")
+        st.caption(ai_model_description(ai_model))
 
-        cache_key=f"ai_{ticker}_{period}_{len(hist_ta)}"
-        if st.button("⚡  Generate AI Thesis",type="primary") or cache_key in st.session_state:
-            if cache_key not in st.session_state:
-                ai=built_in_ai_thesis(ticker,info,risk,hist_ta)
-                st.session_state[cache_key]=ai
+        ai=built_in_ai_thesis(ticker,info,risk,hist_ta,model=ai_model)
+        if not ai:
+            st.error("AI thesis returned empty — try again.")
+            return
 
-            ai=st.session_state.get(cache_key,{})
-            if not ai:
-                st.error("AI thesis returned empty — try again.")
-                return
+        rec=ai.get("recommendation","—")
+        rc=GREEN if rec in ("Buy", "Strong Buy") else RED if rec=="Sell" else AMBER
 
-            rec=ai.get("recommendation","—")
-            rc=GREEN if rec=="Buy" else RED if rec=="Sell" else AMBER
-
-            ah1,ah2,ah3,ah4=st.columns(4)
-            with ah1:
-                st.markdown(f"""
-                <div class="verdict-card" style="border-color:{rc};background:{rc}0d">
-                  <div style="font-size:10px;color:{rc};text-transform:uppercase;
-                              letter-spacing:0.1em;margin-bottom:10px">AI Recommendation</div>
-                  <div style="font-size:2.5rem;font-weight:800;color:{rc};
-                              letter-spacing:-0.02em">{rec}</div>
-                  <div style="font-size:12px;color:{rc};margin-top:8px">
-                    {ai.get('confidence',0)}% confidence</div>
-                </div>""", unsafe_allow_html=True)
-            with ah2:
-                tgt=ai.get("price_target",0); up=ai.get("upside_pct",0)
-                st.metric("12-Month Price Target",f"${tgt:.2f}" if tgt else "—")
-                st.metric("Implied Upside / Downside",f"{up:+.1f}%" if up else "—")
-            with ah3:
-                st.metric("Investment Style",ai.get("style","—"))
-                st.metric("Time Horizon",ai.get("horizon","—"))
-                st.metric("Competitive Moat",ai.get("moat","—"))
-            with ah4:
-                st.metric("ESG Score",f"{ai.get('esg_score',0)}/100")
-                st.metric("Overall Score",f"{ai.get('overall_score',0)}/100")
-                st.metric("Insider Signal",ai.get("insider","—"))
-
-            shead("Factor Scores")
-            for lbl,sc in [
-                ("Valuation",  ai.get("valuation_score", 50)),
-                ("Quality",    ai.get("quality_score",   50)),
-                ("Growth",     ai.get("growth_score",    50)),
-                ("Momentum",   ai.get("momentum_score",  50)),
-                ("Safety",     100-ai.get("risk_score",  50)),
-            ]:
-                score_bar(lbl,sc)
-
-            shead("Investment Summary")
-            st.markdown(f'<div style="font-size:14px;color:#94a3b8;line-height:1.8">'
-                        f'{ai.get("summary","")}</div>', unsafe_allow_html=True)
-            st.markdown(f'<div style="font-size:12px;color:#475569;margin-top:8px">'
-                        f'Moat: {ai.get("moat_desc","")}</div>', unsafe_allow_html=True)
-
-            shead("Bull vs Bear Case")
-            bb1,bb2=st.columns(2)
-            with bb1:
-                st.markdown(f"""
-                <div class="bull-card">
-                  <div style="color:#10b981;font-weight:700;margin-bottom:10px;font-size:14px">▲ Bull Case</div>
-                  <div style="font-size:13px;color:#6ee7b7;line-height:1.8">{ai.get("bull","")}</div>
-                </div>""", unsafe_allow_html=True)
-            with bb2:
-                st.markdown(f"""
-                <div class="bear-card">
-                  <div style="color:#ef4444;font-weight:700;margin-bottom:10px;font-size:14px">▼ Bear Case</div>
-                  <div style="font-size:13px;color:#fca5a5;line-height:1.8">{ai.get("bear","")}</div>
-                </div>""", unsafe_allow_html=True)
-
-            st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
-            cat_col,risk_col=st.columns(2)
-            with cat_col:
-                shead("Catalysts to Watch")
-                for c_ in ai.get("catalysts",[]):
-                    st.markdown(f'<div class="signal-row">→ {c_}</div>', unsafe_allow_html=True)
-            with risk_col:
-                shead("Key Risks to Monitor")
-                for r_ in ai.get("risks",[]):
-                    st.markdown(f'<div class="signal-row" style="border-color:rgba(239,68,68,0.25)">'
-                                f'▲ {r_}</div>', unsafe_allow_html=True)
-
-            shead("ESG Assessment")
-            st.markdown(f'<div style="font-size:13px;color:#94a3b8;line-height:1.8">'
-                        f'{ai.get("esg_notes","")}</div>', unsafe_allow_html=True)
-
-            st.markdown("""
-            <div style="margin-top:2rem;padding:12px 18px;background:#0d0f14;
-                        border:1px solid #1e2433;border-radius:8px;
-                        font-size:11px;color:#334155;line-height:1.7">
-              ⚠️ Built-in thesis analysis is for informational purposes only and does not constitute
-              financial advice. Always conduct your own due diligence and consult a
-              qualified financial advisor before making investment decisions.
+        ah1,ah2,ah3,ah4=st.columns(4)
+        with ah1:
+            st.markdown(f"""
+            <div class="verdict-card" style="border-color:{rc};background:{rc}0d">
+              <div style="font-size:10px;color:{rc};text-transform:uppercase;
+                          letter-spacing:0.1em;margin-bottom:10px">AI Recommendation</div>
+              <div style="font-size:2.5rem;font-weight:800;color:{rc};
+                          letter-spacing:-0.02em">{rec}</div>
+              <div style="font-size:12px;color:{rc};margin-top:8px">
+                {ai.get('confidence',0)}% confidence</div>
             </div>""", unsafe_allow_html=True)
+        with ah2:
+            tgt=ai.get("price_target",0); up=ai.get("upside_pct",0)
+            st.metric("12-Month Price Target",f"${tgt:.2f}" if tgt else "—")
+            st.metric("Implied Upside / Downside",f"{up:+.1f}%" if up else "—")
+        with ah3:
+            st.metric("Investment Style",ai.get("style","—"))
+            st.metric("Time Horizon",ai.get("horizon","—"))
+            st.metric("Competitive Moat",ai.get("moat","—"))
+        with ah4:
+            st.metric("ESG Score",f"{ai.get('esg_score',0)}/100")
+            st.metric("Overall Score",f"{ai.get('overall_score',0)}/100")
+            st.metric("Insider Signal",ai.get("insider","—"))
+
+        shead("Factor Scores")
+        for lbl,sc in [
+            ("Valuation",  ai.get("valuation_score", 50)),
+            ("Quality",    ai.get("quality_score",   50)),
+            ("Growth",     ai.get("growth_score",    50)),
+            ("Momentum",   ai.get("momentum_score",  50)),
+            ("Safety",     100-ai.get("risk_score",  50)),
+        ]:
+            score_bar(lbl,sc)
+
+        shead("Investment Summary")
+        st.markdown(f'<div style="font-size:14px;color:#94a3b8;line-height:1.8">'
+                    f'{ai.get("summary","")}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="font-size:12px;color:#475569;margin-top:8px">'
+                    f'Moat: {ai.get("moat_desc","")}</div>', unsafe_allow_html=True)
+
+        shead("Bull vs Bear Case")
+        bb1,bb2=st.columns(2)
+        with bb1:
+            st.markdown(f"""
+            <div class="bull-card">
+              <div style="color:#10b981;font-weight:700;margin-bottom:10px;font-size:14px">▲ Bull Case</div>
+              <div style="font-size:13px;color:#6ee7b7;line-height:1.8">{ai.get("bull","")}</div>
+            </div>""", unsafe_allow_html=True)
+        with bb2:
+            st.markdown(f"""
+            <div class="bear-card">
+              <div style="color:#ef4444;font-weight:700;margin-bottom:10px;font-size:14px">▼ Bear Case</div>
+              <div style="font-size:13px;color:#fca5a5;line-height:1.8">{ai.get("bear","")}</div>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
+        cat_col,risk_col=st.columns(2)
+        with cat_col:
+            shead("Catalysts to Watch")
+            for c_ in ai.get("catalysts",[]):
+                st.markdown(f'<div class="signal-row">→ {c_}</div>', unsafe_allow_html=True)
+        with risk_col:
+            shead("Key Risks to Monitor")
+            for r_ in ai.get("risks",[]):
+                st.markdown(f'<div class="signal-row" style="border-color:rgba(239,68,68,0.25)">'
+                            f'▲ {r_}</div>', unsafe_allow_html=True)
+
+        shead("ESG Assessment")
+        st.markdown(f'<div style="font-size:13px;color:#94a3b8;line-height:1.8">'
+                    f'{ai.get("esg_notes","")}</div>', unsafe_allow_html=True)
+
+        st.markdown("""
+        <div style="margin-top:2rem;padding:12px 18px;background:#0d0f14;
+                    border:1px solid #1e2433;border-radius:8px;
+                    font-size:11px;color:#334155;line-height:1.7">
+          ⚠️ Built-in thesis analysis is for informational purposes only and does not constitute
+          financial advice. Always conduct your own due diligence and consult a
+          qualified financial advisor before making investment decisions.
+        </div>""", unsafe_allow_html=True)
 
         page_comment("Reading this page", ["<b>AI thesis:</b> this is a rule-based dashboard summary, not external financial advice.", "<b>Scores:</b> combine valuation, quality, growth, momentum, and risk; confirm with news and filings before trading.", "<b>Best use:</b> use it as a checklist to spot strengths and weaknesses quickly."])
 
