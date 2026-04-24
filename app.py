@@ -8,7 +8,6 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -22,68 +21,17 @@ import time
 import requests
 import json, re, copy, math
 
-# ── Patch yfinance downloader with browser User-Agent ────────────
-import yfinance.utils as _yf_utils
-_orig_get_json = getattr(_yf_utils, "get_json", None)
+# ── FMP-only compatibility helpers ────────────────────────────────
+# All market/fundamental/news data is routed through Financial Modeling Prep.
+# The compatibility _fmp_ticker() name is kept only so the rest of the app UI can stay unchanged.
+def _fmp_ticker(symbol, proxy=None):
+    return _FMPTicker(symbol)
 
-try:
-    import curl_cffi  # noqa: F401 — used by yfinance internally if installed
-except ImportError:
-    pass
-
-# Monkey-patch requests User-Agent so all yfinance calls look like Chrome
-_YF_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-}
-try:
-    import yfinance.data as _yfd
-    if hasattr(_yfd, "YfData"):
-        _orig_init = _yfd.YfData.__init__
-        def _patched_init(self, *args, **kwargs):
-            _orig_init(self, *args, **kwargs)
-            if hasattr(self, "session") and self.session is not None:
-                self.session.headers.update(_YF_HEADERS)
-        _yfd.YfData.__init__ = _patched_init
-except Exception:
-    pass
-
-# ── Free rotating proxy list for Yahoo Finance ───────────────────
-_YF_PROXIES = [
-    None,   # try direct first
-    "https://query1.finance.yahoo.com",
-    "https://query2.finance.yahoo.com",
-]
-
-def _yf_ticker(symbol, proxy=None):
-    """Simple yfinance Ticker wrapper."""
+def _fmp_history_safe(ticker_obj, retries=3, **kwargs):
     try:
-        if proxy:
-            return yf.Ticker(symbol, proxy=proxy)
-        return yf.Ticker(symbol)
+        return ticker_obj.history(**kwargs)
     except Exception:
-        return yf.Ticker(symbol)
-
-# ── Yahoo Finance rate-limit retry helper ─────────────────────────
-def _yf_history_safe(ticker_obj, retries=3, **kwargs):
-    """Wrap yfinance history() with exponential backoff for rate limits."""
-    import time as _time
-    for attempt in range(retries):
-        try:
-            h = ticker_obj.history(**kwargs)
-            if h is not None and not h.empty:
-                return h
-        except Exception as e:
-            msg = str(e).lower()
-            if "too many requests" in msg or "rate limit" in msg or "429" in msg:
-                wait = 2 ** attempt
-                _time.sleep(wait)
-                continue
-            raise
-    return pd.DataFrame()
+        return pd.DataFrame()
 
 st.set_page_config(
     page_title="SmartStock",
@@ -354,7 +302,7 @@ ZH = {
     "Importance first": "重要性优先", "Newest first": "最新优先", "Update News": "更新新闻", "Update": "更新", "Open source": "打开来源", "Influence": "股价影响", "Importance": "重要性",
     "No short summary was provided by the source.": "来源未提供简短摘要。", "No matching recent news found. Try a broader keyword or click Update News.": "未找到匹配的近期新闻。请尝试更宽泛的关键词，或点击更新新闻。",
     "Latest Market News": "最新全球市场新闻", "Market news by importance/time with AI-style impact analysis.": "按重要性/发布时间排序的全球市场新闻，并带AI风格影响分析。", "Country Filter": "国家筛选", "Category Filter": "类别筛选", "Industry Impact Filter": "行业影响筛选", "Update Market News": "更新市场新闻",
-    "Priority: Yahoo Finance/yfinance first, then WSJ/RSS and broad financial news. Duplicate/overlapping headlines are filtered.": "优先级：Yahoo Finance/yfinance优先，其次为WSJ/RSS和其他财经新闻；重复或重叠标题会被过滤。",
+    "Priority: FMP first, then WSJ/RSS and broad financial news. Duplicate/overlapping headlines are filtered.": "优先级：FMP优先，其次为WSJ/RSS和其他财经新闻；重复或重叠标题会被过滤。",
     "Market Movers & Volatility Ranking": "市场异动与波动率排名", "Global Index Performance": "全球主要指数表现", "Industry Filter": "行业筛选", "Ranking Size": "排名数量", "Ranking Metric": "排名指标", "Update Rankings": "更新排名", "Top Movers Table": "异动股票表", "Top Price Change Chart": "价格变动排名图", "Top Volatility Chart": "波动率排名图", "All Industries": "全部行业", "Technology": "科技", "Semiconductors": "半导体", "Software": "软件", "Financials": "金融", "Energy": "能源", "Healthcare": "医疗保健", "Consumer": "消费", "Ticker": "股票代码", "Company": "公司", "Last Price": "最新价", "Change $": "价格变化$", "Change %": "涨跌幅%", "20D Vol %": "20日波动率%", "Volume Ratio": "成交量倍数", "Investment Note": "投资备注", "Major Index Curves": "主要指数走势", "Index Ranking by % Change": "按涨跌幅排名的指数", "Commodity Dashboard": "大宗商品仪表盘", "Commodity Curves": "大宗商品走势", "Commodity Indicators": "大宗商品指标", "Display indexes on chart": "选择图表显示的指数", "Display commodities on chart": "选择图表显示的大宗商品",
 }
 
@@ -421,7 +369,7 @@ ZH.update({
     "Materials": "材料",
     "Crypto": "加密资产",
     "No broad market news matched these filters. Try a broader keyword, ticker, country, category, or industry filter.": "没有符合筛选条件的市场新闻。请尝试更宽泛的关键词、股票代码、国家/地区、类别或行业筛选。",
-    "Market news by importance/time with AI-style impact analysis. Sources prioritize yfinance/Yahoo Finance and WSJ first, then reliable broad RSS discovery.": "按重要性/发布时间展示全球市场新闻，并提供AI风格影响分析。来源优先使用yfinance/Yahoo Finance和WSJ，其次使用可靠的广泛RSS新闻。",
+    "Market news by importance/time with AI-style impact analysis. Sources prioritize FMP and WSJ first, then reliable broad RSS discovery.": "按重要性/发布时间展示全球市场新闻，并提供AI风格影响分析。来源优先使用FMP和WSJ，其次使用可靠的广泛RSS新闻。",
 })
 
 
@@ -591,19 +539,58 @@ def legend_html(items):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  DATA LAYER — FMP (primary) + yfinance (fallback for charts)
+#  DATA LAYER — FMP ONLY
 # ══════════════════════════════════════════════════════════════════
 import os as _os
-_FMP_KEY = _os.environ.get("FMP_API_KEY", "DxeKYRzNAkRg9sVrsVEZUNUSVqKzCHa0")
+_FMP_KEY = _os.environ.get("FMP_API_KEY", "")
 _FMP_BASE = "https://financialmodelingprep.com/api/v3"
 
+
+_FMP_SYMBOL_MAP = {
+    "^GSPC": "SPY", "^DJI": "DIA", "^IXIC": "QQQ", "^RUT": "IWM", "^VIX": "VIXY",
+    "CL=F": "USO", "BZ=F": "BNO", "GC=F": "GLD", "SI=F": "SLV", "HG=F": "CPER", "NG=F": "UNG",
+    "BTC-USD": "BTCUSD", "ETH-USD": "ETHUSD",
+}
+
+def _fmp_symbol(symbol):
+    s = str(symbol or "").upper().strip()
+    return _FMP_SYMBOL_MAP.get(s, s)
+
+def _period_to_days(period, default=730):
+    txt = str(period or "2y").lower().strip()
+    if txt == "max":
+        return 7300
+    m = re.fullmatch(r"(\d+)(d|mo|y)", txt)
+    if not m:
+        return default
+    n, unit = int(m.group(1)), m.group(2)
+    return n if unit == "d" else n * 30 if unit == "mo" else n * 365
+
+def _normalize_ohlcv(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce")
+        out = out.dropna(subset=["date"]).set_index("date")
+    elif not isinstance(out.index, pd.DatetimeIndex):
+        return pd.DataFrame()
+    out = out.sort_index()
+    out = out.rename(columns={"open":"Open", "high":"High", "low":"Low", "close":"Close", "adjClose":"Adj Close", "volume":"Volume"})
+    for col in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+    if "Close" not in out.columns and "Adj Close" in out.columns:
+        out["Close"] = out["Adj Close"]
+    keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in out.columns]
+    return out[keep].dropna(subset=["Close"])
 
 def _fmp_get(endpoint, params=None):
     """Make a single FMP API call and return parsed JSON or None."""
     try:
         p = params or {}
         p["apikey"] = _FMP_KEY
-        r = requests.get(f"{_FMP_BASE}/{endpoint}", params=p, timeout=10)
+        r = requests.get(f"{_FMP_BASE}/{endpoint}", params=p, timeout=15)
         if r.status_code == 200:
             data = r.json()
             if isinstance(data, list) and len(data) > 0:
@@ -616,11 +603,11 @@ def _fmp_get(endpoint, params=None):
 
 
 def _fmp_build_info(ticker):
-    """Build a yfinance-compatible info dict from FMP endpoints."""
+    """Build a app-compatible info dict from FMP endpoints."""
     info = {}
     try:
         # Profile — company info + fundamentals
-        profile = _fmp_get(f"profile/{ticker}")
+        profile = _fmp_get(f"profile/{_fmp_symbol(ticker)}")
         if profile and isinstance(profile, list):
             p = profile[0]
             info.update({
@@ -645,7 +632,7 @@ def _fmp_build_info(ticker):
             })
 
         # Key metrics — valuation ratios
-        metrics = _fmp_get(f"key-metrics-ttm/{ticker}")
+        metrics = _fmp_get(f"key-metrics-ttm/{_fmp_symbol(ticker)}")
         if metrics and isinstance(metrics, list):
             m = metrics[0]
             info.update({
@@ -667,7 +654,7 @@ def _fmp_build_info(ticker):
             })
 
         # Financial ratios — margins and growth
-        ratios = _fmp_get(f"ratios-ttm/{ticker}")
+        ratios = _fmp_get(f"ratios-ttm/{_fmp_symbol(ticker)}")
         if ratios and isinstance(ratios, list):
             r = ratios[0]
             info.update({
@@ -678,7 +665,7 @@ def _fmp_build_info(ticker):
             })
 
         # Income statement — revenue, earnings
-        income = _fmp_get(f"income-statement/{ticker}", {"limit": 2})
+        income = _fmp_get(f"income-statement/{_fmp_symbol(ticker)}", {"limit": 2})
         if income and isinstance(income, list) and len(income) >= 1:
             latest = income[0]
             prev   = income[1] if len(income) > 1 else {}
@@ -697,7 +684,7 @@ def _fmp_build_info(ticker):
             })
 
         # Balance sheet — debt, cash
-        balance = _fmp_get(f"balance-sheet-statement/{ticker}", {"limit": 1})
+        balance = _fmp_get(f"balance-sheet-statement/{_fmp_symbol(ticker)}", {"limit": 1})
         if balance and isinstance(balance, list):
             b = balance[0]
             info.update({
@@ -707,7 +694,7 @@ def _fmp_build_info(ticker):
             })
 
         # Cash flow — free cash flow
-        cashflow = _fmp_get(f"cash-flow-statement/{ticker}", {"limit": 1})
+        cashflow = _fmp_get(f"cash-flow-statement/{_fmp_symbol(ticker)}", {"limit": 1})
         if cashflow and isinstance(cashflow, list):
             c = cashflow[0]
             info.update({
@@ -716,7 +703,7 @@ def _fmp_build_info(ticker):
             })
 
         # Analyst estimates
-        estimates = _fmp_get(f"analyst-stock-recommendations/{ticker}", {"limit": 5})
+        estimates = _fmp_get(f"analyst-stock-recommendations/{_fmp_symbol(ticker)}", {"limit": 5})
         if estimates and isinstance(estimates, list):
             buys   = sum(e.get("analystRatingsbuy", 0) for e in estimates)
             holds  = sum(e.get("analystRatingsHold", 0) for e in estimates)
@@ -736,20 +723,15 @@ def _fmp_build_info(ticker):
 
 
 def _fmp_build_hist(ticker, period="2y"):
-    """Fetch OHLCV history from FMP and return as yfinance-compatible DataFrame."""
+    """Fetch OHLCV history from FMP and return as app-compatible DataFrame."""
     try:
         # Map period to FMP from/to dates
         from datetime import datetime, timedelta
-        period_days = {
-            "1mo": 30, "3mo": 90, "6mo": 180,
-            "1y": 365, "2y": 730, "5y": 1825,
-            "10y": 3650, "max": 7300,
-        }
-        days = period_days.get(str(period).lower(), 730)
+        days = _period_to_days(period, default=730)
         date_from = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
         date_to   = datetime.today().strftime("%Y-%m-%d")
 
-        data = _fmp_get(f"historical-price-full/{ticker}",
+        data = _fmp_get(f"historical-price-full/{_fmp_symbol(ticker)}",
                         {"from": date_from, "to": date_to})
 
         if not data:
@@ -784,8 +766,115 @@ def _fmp_build_hist(ticker, period="2y"):
         return pd.DataFrame()
 
 
+
+def _fmp_build_intraday(ticker, period="5d", interval="5m"):
+    """Fetch intraday bars from FMP. Requires an FMP plan that includes historical-chart endpoints."""
+    interval_map = {
+        "1m": "1min", "2m": "1min", "5m": "5min", "15m": "15min", "30m": "30min",
+        "60m": "1hour", "90m": "1hour", "1h": "1hour", "1hour": "1hour", "4h": "4hour", "4hour": "4hour",
+    }
+    fmp_interval = interval_map.get(str(interval).lower(), str(interval).lower())
+    try:
+        data = _fmp_get(f"historical-chart/{fmp_interval}/{_fmp_symbol(ticker)}")
+        if not data:
+            return pd.DataFrame()
+        df = _normalize_ohlcv(pd.DataFrame(data))
+        if df.empty:
+            return df
+        cutoff = pd.Timestamp.today() - pd.Timedelta(days=_period_to_days(period, default=30))
+        if isinstance(df.index, pd.DatetimeIndex):
+            df = df[df.index >= cutoff]
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def _fmp_statement_df(endpoint, ticker, limit=8):
+    """Return FMP statements in a app-compatible shape: rows=line items, columns=period dates."""
+    data = _fmp_get(f"{endpoint}/{_fmp_symbol(ticker)}", {"limit": limit})
+    if not data or not isinstance(data, list):
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    if df.empty or "date" not in df.columns:
+        return pd.DataFrame()
+    drop_cols = {"date", "symbol", "reportedCurrency", "cik", "fillingDate", "acceptedDate", "calendarYear", "period", "link", "finalLink"}
+    value_cols = [c for c in df.columns if c not in drop_cols]
+    out = df[["date"] + value_cols].set_index("date").T
+    out.columns = pd.to_datetime(out.columns, errors="ignore")
+    return out
+
+
+def _fmp_news_items(ticker="", limit=50):
+    params = {"limit": int(limit)}
+    if ticker:
+        params["tickers"] = _fmp_symbol(ticker)
+    data = _fmp_get("stock_news", params)
+    rows = []
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            rows.append({
+                "ticker": ticker or clean_text(item.get("symbol", "")),
+                "title": clean_text(item.get("title", "")),
+                "summary": clean_text(item.get("text") or item.get("site") or ""),
+                "publisher": clean_text(item.get("site") or "FMP"),
+                "link": clean_text(item.get("url", "")),
+                "ts": _news_timestamp(item.get("publishedDate")),
+                "source_rank": 1,
+            })
+    return rows
+
+
+class _FMPTicker:
+    """Small app-compatible wrapper backed entirely by FMP."""
+    def __init__(self, symbol):
+        self.symbol = str(symbol or "").upper().strip()
+
+    @property
+    def info(self):
+        return self.get_info()
+
+    def get_info(self):
+        return _fmp_build_info(self.symbol) or {"symbol": self.symbol, "shortName": self.symbol, "longName": self.symbol}
+
+    def history(self, period="1y", interval="1d", auto_adjust=True, prepost=False, **kwargs):
+        del auto_adjust, prepost, kwargs
+        if str(interval).lower() in {"1d", "5d", "1wk", "1mo", "3mo"}:
+            return _fmp_build_hist(self.symbol, period=period)
+        return _fmp_build_intraday(self.symbol, period=period, interval=interval)
+
+    @property
+    def news(self):
+        return _fmp_news_items(self.symbol, limit=50)
+
+    @property
+    def quarterly_financials(self):
+        return _fmp_statement_df("income-statement", self.symbol, limit=8)
+
+    @property
+    def financials(self):
+        return _fmp_statement_df("income-statement", self.symbol, limit=8)
+
+    @property
+    def quarterly_balance_sheet(self):
+        return _fmp_statement_df("balance-sheet-statement", self.symbol, limit=8)
+
+    @property
+    def balance_sheet(self):
+        return _fmp_statement_df("balance-sheet-statement", self.symbol, limit=8)
+
+    @property
+    def quarterly_cashflow(self):
+        return _fmp_statement_df("cash-flow-statement", self.symbol, limit=8)
+
+    @property
+    def cashflow(self):
+        return _fmp_statement_df("cash-flow-statement", self.symbol, limit=8)
+
+
 def _fetch_stock_uncached(ticker, period="2y"):
-    """Fetch stock data using FMP only — no Yahoo Finance calls."""
+    """Fetch stock data using FMP only — no FMP calls."""
     try:
         # Step 1: get price history from FMP
         hist = _fmp_build_hist(ticker, period)
@@ -814,27 +903,18 @@ def fetch_stock(ticker, period="2y"):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_chart_history(ticker, period="1y", interval="1d", prepost=False):
-    """Fetch chart data from FMP (primary) with yfinance fallback for intraday."""
-    # FMP for daily/weekly data
-    if interval in ("1d", "5d", "1wk", "1mo", "3mo"):
-        try:
-            h = _fmp_build_hist(ticker, period)
-            if not h.empty:
-                return h, None
-        except Exception:
-            pass
-
-    # yfinance fallback for intraday intervals (FMP intraday needs higher plan)
+    """Fetch chart data from FMP only. Intraday requires an FMP plan with historical-chart access."""
+    del prepost
     try:
-        import time as _t
-        h = _yf_ticker(ticker).history(period=period, interval=interval,
-                                        auto_adjust=True, prepost=prepost)
-        if not h.empty:
+        if str(interval).lower() in ("1d", "5d", "1wk", "1mo", "3mo"):
+            h = _fmp_build_hist(ticker, period)
+        else:
+            h = _fmp_build_intraday(ticker, period=period, interval=interval)
+        if h is not None and not h.empty:
             return h, None
     except Exception as e:
-        pass
-
-    return None, "No chart history returned."
+        return None, str(e)
+    return None, "No FMP chart history returned. Check your FMP plan, ticker, or interval."
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -842,7 +922,7 @@ def fetch_peers(tickers: tuple, period="1y"):
     out = {}
     for t in tickers:
         try:
-            s = _yf_ticker(t)
+            s = _fmp_ticker(t)
             h = s.history(period=period, auto_adjust=True)
             if not h.empty:
                 out[t] = {"info": s.info, "hist": h}
@@ -852,19 +932,19 @@ def fetch_peers(tickers: tuple, period="1y"):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_spy(period="2y"):
-    return _yf_ticker("SPY").history(period=period, auto_adjust=True)
+    return _fmp_ticker("SPY").history(period=period, auto_adjust=True)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_financial_reports(ticker):
-    """Fetch the three major statements from yfinance.
+    """Fetch the three major statements from FMP.
 
     Returns quarterly and annual income statement, balance sheet, and cash flow
     statements.  The UI compares the latest period with the previous period and,
     when quarterly data has at least five columns, the same quarter last year.
     """
     try:
-        tk = _yf_ticker(ticker)
+        tk = _fmp_ticker(ticker)
         return {
             "Quarterly Income Statement": tk.quarterly_financials,
             "Annual Income Statement": tk.financials,
@@ -879,72 +959,36 @@ def fetch_financial_reports(ticker):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def search_companies_by_keyword(keyword, max_results=12):
-    """Search Yahoo Finance by company name/keyword and rank results by market cap.
-
-    Uses yfinance.Search when available and falls back to Yahoo's public search
-    endpoint. Market-cap enrichment is intentionally capped so the sidebar stays
-    responsive and avoids unnecessary Yahoo rate-limit pressure.
-    """
+    """Search listed companies through FMP only and enrich with FMP profiles."""
     keyword = clean_text(keyword or "").strip() if "clean_text" in globals() else str(keyword or "").strip()
     if len(keyword) < 2:
         return []
-
     rows = []
-
-    def add_quote(q):
-        if not isinstance(q, dict):
-            return
-        symbol = str(q.get("symbol") or q.get("ticker") or "").strip().upper()
-        if not symbol:
-            return
-        # Keep the search focused on listed companies/ETFs, not futures, indexes, FX, or options.
-        quote_type = str(q.get("quoteType") or q.get("typeDisp") or "").upper()
-        if symbol.startswith("^") or "=F" in symbol or quote_type in {"INDEX", "FUTURE", "CURRENCY", "CRYPTOCURRENCY", "OPTION"}:
-            return
-        name = str(q.get("shortname") or q.get("longname") or q.get("shortName") or q.get("longName") or q.get("name") or symbol).strip()
-        exchange = str(q.get("exchDisp") or q.get("exchange") or q.get("fullExchangeName") or "").strip()
-        market_cap = safe_float(q.get("marketCap") or q.get("market_cap") or 0, 0)
-        rows.append({"Ticker": symbol, "Company": name, "Exchange": exchange, "Market Cap": market_cap, "Quote Type": quote_type or "EQUITY"})
-
     try:
-        search_obj = yf.Search(keyword, max_results=max_results * 2)
-        for q in getattr(search_obj, "quotes", []) or []:
-            add_quote(q)
+        data = _fmp_get("search", {"query": keyword, "limit": max_results * 3})
+        if isinstance(data, list):
+            for q in data:
+                symbol = str(q.get("symbol") or "").upper().strip()
+                if not symbol:
+                    continue
+                name = str(q.get("name") or symbol).strip()
+                exchange = str(q.get("exchangeShortName") or q.get("stockExchange") or "").strip()
+                info = _fmp_build_info(symbol) or {}
+                rows.append({
+                    "Ticker": symbol,
+                    "Company": info.get("shortName") or info.get("longName") or name,
+                    "Exchange": info.get("exchange") or exchange or "FMP",
+                    "Market Cap": safe_float(info.get("marketCap"), 0) if "safe_float" in globals() else float(info.get("marketCap") or 0),
+                    "Quote Type": "EQUITY",
+                })
     except Exception:
         pass
-
-    if not rows:
-        try:
-            headers = {"User-Agent": "Mozilla/5.0 StockAnalyzer/1.0"}
-            params = {"q": keyword, "quotesCount": max_results * 2, "newsCount": 0, "enableFuzzyQuery": "true", "quotesQueryId": "tss_match_phrase_query"}
-            r = requests.get("https://query1.finance.yahoo.com/v1/finance/search", params=params, headers=headers, timeout=6)
-            if r.ok:
-                for q in (r.json().get("quotes") or []):
-                    add_quote(q)
-        except Exception:
-            pass
-
-    # Deduplicate while preserving the best available market-cap/name fields.
     by_symbol = {}
     for row in rows:
         sym = row["Ticker"]
         if sym not in by_symbol or row.get("Market Cap", 0) > by_symbol[sym].get("Market Cap", 0):
             by_symbol[sym] = row
-    rows = list(by_symbol.values())[:max_results * 2]
-
-    # Enrich missing market caps so dropdown can truly be ordered by market cap.
-    for row in rows[:max_results]:
-        if row.get("Market Cap", 0) > 0 and row.get("Company") and row.get("Company") != row.get("Ticker"):
-            continue
-        try:
-            info = _yf_ticker(row["Ticker"]).get_info()
-            row["Market Cap"] = safe_float(info.get("marketCap"), row.get("Market Cap", 0))
-            row["Company"] = str(info.get("shortName") or info.get("longName") or row.get("Company") or row["Ticker"])
-            row["Exchange"] = str(info.get("exchange") or info.get("fullExchangeName") or row.get("Exchange") or "")
-        except Exception:
-            pass
-
-    rows = sorted(rows, key=lambda x: (safe_float(x.get("Market Cap"), 0), x.get("Company", "")), reverse=True)
+    rows = sorted(by_symbol.values(), key=lambda x: (safe_float(x.get("Market Cap", 0), 0), x.get("Company", "")), reverse=True)
     return rows[:max_results]
 
 
@@ -1247,7 +1291,7 @@ def calc_risk(hist, spy):
     """Risk metrics using date-aligned daily returns.
 
     Notes:
-    - Uses adjusted close from yfinance histories.
+    - Uses adjusted close from FMP histories.
     - Aligns stock and SPY returns by timestamp before beta/alpha/R² calculations.
     - Annualization uses 252 trading days, which is standard for U.S. equities.
     """
@@ -1828,7 +1872,7 @@ def _extract_yf_news_item(item, ticker):
     summary = clean_text((content.get("summary") if isinstance(content, dict) else "") or (content.get("description") if isinstance(content, dict) else "") or (item.get("summary", "") if isinstance(item, dict) else ""))
     provider = content.get("provider") if isinstance(content, dict) else None
     publisher = provider.get("displayName", "") if isinstance(provider, dict) else ""
-    publisher = clean_text(publisher or (content.get("publisher") if isinstance(content, dict) else "") or (item.get("publisher", "Yahoo Finance") if isinstance(item, dict) else "Yahoo Finance"))
+    publisher = clean_text(publisher or (content.get("publisher") if isinstance(content, dict) else "") or (item.get("publisher", "FMP") if isinstance(item, dict) else "FMP"))
     link = ""
     if isinstance(content, dict) and isinstance(content.get("clickThroughUrl"), dict):
         link = content.get("clickThroughUrl", {}).get("url", "")
@@ -1841,7 +1885,7 @@ def _extract_yf_news_item(item, ticker):
     if not ts_val and isinstance(item, dict):
         ts_val = item.get("providerPublishTime")
     ts = _news_timestamp(ts_val)
-    return {"ticker": ticker, "title": title, "summary": summary, "publisher": publisher or "Yahoo Finance", "link": link, "ts": ts, "source_rank": 1}
+    return {"ticker": ticker, "title": title, "summary": summary, "publisher": publisher or "FMP", "link": link, "ts": ts, "source_rank": 1}
 
 
 def sentiment_and_impact(title, summary, ticker=""):
@@ -1976,7 +2020,7 @@ def fetch_news_items(ticker, keyword="", refresh_token=0):
     del refresh_token
     items = []
     try:
-        yf_news = _yf_ticker(ticker).news or []
+        yf_news = _fmp_ticker(ticker).news or []
         for raw in yf_news[:35]:
             n = _extract_yf_news_item(raw, ticker)
             if n["title"]:
@@ -2093,7 +2137,7 @@ MARKET_NEWS_INDUSTRIES = [
     "Autos", "Healthcare", "Biotech", "Utilities", "Real Estate", "Materials", "Crypto",
 ]
 MARKET_SOURCE_RANK = {
-    "Yahoo Finance": 1, "WSJ": 1, "Wall Street Journal": 1,
+    "FMP": 1, "WSJ": 1, "Wall Street Journal": 1,
     "Reuters": 2, "Associated Press": 2, "AP": 2, "CNBC": 2, "Bloomberg": 2, "MarketWatch": 2,
     "Financial Times": 3, "Barron's": 3, "Investing.com": 4, "Google News": 5,
 }
@@ -2280,7 +2324,7 @@ def fetch_market_news(keyword="", ticker_query="", refresh_token=0):
     ticker_company = ""
     if ticker_query:
         try:
-            tinfo = _yf_ticker(ticker_query).get_info()
+            tinfo = _fmp_ticker(ticker_query).get_info()
             ticker_company = clean_text(tinfo.get("shortName") or tinfo.get("longName") or "")
         except Exception:
             ticker_company = ""
@@ -2291,10 +2335,10 @@ def fetch_market_news(keyword="", ticker_query="", refresh_token=0):
         market_symbols.insert(0, ticker_query)
     for symbol in market_symbols:
         try:
-            for raw in (_yf_ticker(symbol).news or [])[:12]:
+            for raw in (_fmp_ticker(symbol).news or [])[:12]:
                 n = _extract_yf_news_item(raw, symbol)
                 if n.get("title"):
-                    n["publisher"] = n.get("publisher") or "Yahoo Finance"
+                    n["publisher"] = n.get("publisher") or "FMP"
                     n["source_rank"] = 1
                     items.append(n)
         except Exception:
@@ -2946,7 +2990,7 @@ def fetch_market_regime_for_investor(refresh_token=0):
     rows = {}
     for sym in symbols:
         try:
-            h = _yf_ticker(sym).history(period="1y", auto_adjust=True)
+            h = _fmp_ticker(sym).history(period="1y", auto_adjust=True)
             if h is None or h.empty or "Close" not in h:
                 continue
             close = h["Close"].dropna()
@@ -2989,7 +3033,7 @@ def fetch_investor_universe_data(tickers_tuple, refresh_token=0):
         if str(t).upper() in {"CASH", "CASH / T-BILLS"}:
             continue
         try:
-            tk = _yf_ticker(t)
+            tk = _fmp_ticker(t)
             info = tk.info or {}
             hist = tk.history(period="1y", auto_adjust=True)
             if hist is None or hist.empty or "Close" not in hist:
@@ -3751,7 +3795,7 @@ def fetch_investor_backtest_prices(tickers_tuple, period="1y", refresh_token=0):
         if not t or t in {"CASH", "CASH / T-BILLS", "CASH / T-BILLS (3M)"}:
             continue
         try:
-            h = _yf_ticker(t).history(period=yf_period, auto_adjust=True)
+            h = _fmp_ticker(t).history(period=yf_period, auto_adjust=True)
             if h is None or h.empty or "Close" not in h.columns:
                 continue
             close = pd.to_numeric(h["Close"], errors="coerce").dropna().rename(t)
@@ -3789,7 +3833,7 @@ def _fetch_spy_benchmark(period="1y", refresh_token=0):
         else:
             yf_p = period
             cutoff = None
-        h = _yf_ticker("SPY").history(period=yf_p, auto_adjust=True)
+        h = _fmp_ticker("SPY").history(period=yf_p, auto_adjust=True)
         if h is None or h.empty or "Close" not in h.columns:
             return pd.Series(dtype=float)
         close = pd.to_numeric(h["Close"], errors="coerce").dropna()
@@ -4386,7 +4430,7 @@ def render_investor_backtest_panel(primary_name, primary_port, stance, max_holdi
 
     metrics_df = investor_backtest_metrics_table(results)
     if metrics_df.empty:
-        st.info("Backtest data could not be built from Yahoo Finance. Try a longer window or another investor profile.")
+        st.info("Backtest data could not be built from FMP. Try a longer window or another investor profile.")
         return
 
     # ── Quick-glance KPI row ─────────────────────────────────────
@@ -4538,7 +4582,7 @@ def render_investor_view():
     render_investor_card(investor_name, profile, regime, port)
 
     if port.empty:
-        st.info("Investor model could not fetch enough data from Yahoo Finance. Try Update or choose a different profile.")
+        st.info("Investor model could not fetch enough data from FMP. Try Update or choose a different profile.")
         return
 
     if not port.empty:
@@ -4626,14 +4670,14 @@ def render_investor_view():
     <div class="investor-note"><b>{tr('Current market view')}:</b> {html.escape(market_view)}</div>
     <div class="investor-note"><b>{tr('What this investor may like now')}:</b> {html.escape(likes)}.</div>
     <div class="investor-note"><b>{tr('What this investor may avoid now')}:</b> {html.escape(avoids)}.</div>
-    <div class="investor-note"><b>Scoring model transparency:</b> Factor scores (Value, Quality, Growth, Momentum, Stability) are computed from live Yahoo Finance fundamentals. The final Investor Score blends the investor-style factor weights ({model_blend}%) with a generic quant multi-factor model ({100-model_blend}%), then adds market-regime overlay and news shock adjustment. Position weights use a score-power law with {('concentrated' if 'concentrated' in profile.get('concentration','').lower() else 'diversified')} style — capped at {'35%' if 'concentrated' in profile.get('concentration','').lower() else '25%'} per holding.</div>
+    <div class="investor-note"><b>Scoring model transparency:</b> Factor scores (Value, Quality, Growth, Momentum, Stability) are computed from live FMP fundamentals. The final Investor Score blends the investor-style factor weights ({model_blend}%) with a generic quant multi-factor model ({100-model_blend}%), then adds market-regime overlay and news shock adjustment. Position weights use a score-power law with {('concentrated' if 'concentrated' in profile.get('concentration','').lower() else 'diversified')} style — capped at {'35%' if 'concentrated' in profile.get('concentration','').lower() else '25%'} per holding.</div>
     """, unsafe_allow_html=True)
 
     page_comment("Model disclaimer", [
         "<b>Simulation only:</b> this does not claim to know what any investor currently thinks or owns.",
         "<b>Not financial advice:</b> use as a watchlist/thesis generator, then verify fundamentals, filings, valuation, liquidity, and risk.",
         "<b>Benchmark:</b> SPY (S&P 500) is used as the reference for Alpha, Beta, R², Tracking Error, and Information Ratio.",
-        "<b>Model mechanics:</b> allocation combines investor-style factor weights, current market regime (VIX, MA signals, SPY/QQQ/IWM breadth), news shock tags, and fundamental factor scores from Yahoo Finance.",
+        "<b>Model mechanics:</b> allocation combines investor-style factor weights, current market regime (VIX, MA signals, SPY/QQQ/IWM breadth), news shock tags, and fundamental factor scores from FMP.",
     ])
 
 # ══════════════════════════════════════════════════════════════════
@@ -4733,7 +4777,7 @@ def build_statement_comparison(stmt, rows, quarterly=True):
     if stmt is None or stmt.empty:
         return pd.DataFrame()
     df = stmt.copy()
-    # yfinance statements are rows=items, columns=periods. Keep newest columns first.
+    # FMP statements are converted to rows=items, columns=periods. Keep newest columns first.
     try:
         df = df.loc[:, sorted(df.columns, reverse=True)]
     except Exception:
@@ -4770,7 +4814,7 @@ def render_financial_statement_table(title, stmt, rows, quarterly=True, expanded
     with st.expander(title, expanded=expanded):
         table = build_statement_comparison(stmt, rows, quarterly=quarterly)
         if table.empty:
-            st.info("Financial statement data is unavailable for this ticker from Yahoo Finance.")
+            st.info("Financial statement data is unavailable for this ticker from FMP.")
             return
         st.dataframe(table, use_container_width=True, hide_index=True)
         if quarterly:
@@ -4961,7 +5005,7 @@ def ranking_snapshot(tickers_tuple, period="3mo"):
     rows=[]
     for t in tickers_tuple:
         try:
-            y=_yf_ticker(t); h=y.history(period=period, auto_adjust=True)
+            y=_fmp_ticker(t); h=y.history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h)<2: continue
             close=h["Close"].dropna(); last=float(close.iloc[-1]); prev=float(close.iloc[-2])
             chg=last-prev; pct=chg/prev*100 if prev else 0.0
@@ -5004,12 +5048,12 @@ def ai_score_universe(tickers_tuple, period="1y", model="risk_loving"):
     """Score a universe with the same built-in AI thesis model, grouped by reported industry."""
     rows = []
     try:
-        spy_hist = _yf_ticker("SPY").history(period=period, auto_adjust=True)
+        spy_hist = _fmp_ticker("SPY").history(period=period, auto_adjust=True)
     except Exception:
         spy_hist = pd.DataFrame()
     for t in tickers_tuple:
         try:
-            y = _yf_ticker(t)
+            y = _fmp_ticker(t)
             h = y.history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h) < 35:
                 continue
@@ -5064,7 +5108,7 @@ def index_snapshot(period="1mo"):
     for order, meta in enumerate(GLOBAL_INDEXES):
         name, sym = meta["Index"], meta["Ticker"]
         try:
-            h = _yf_ticker(sym).history(period=period, auto_adjust=True)
+            h = _fmp_ticker(sym).history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h) < 2:
                 continue
             close = h["Close"].dropna()
@@ -5100,7 +5144,7 @@ def commodity_snapshot(period="3mo"):
     for meta in COMMODITIES:
         name, sym = meta["Commodity"], meta["Ticker"]
         try:
-            h = _yf_ticker(sym).history(period=period, auto_adjust=True)
+            h = _fmp_ticker(sym).history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h) < 2:
                 continue
             close = h["Close"].dropna()
@@ -5323,7 +5367,7 @@ def main():
         show_ext_hours = st.checkbox(
             tr("Show pre-market / after-hours curve"),
             value=False,
-            help="Only affects intraday windows. It includes extended-hours bars when Yahoo Finance provides them."
+            help="Only affects intraday windows. It includes extended-hours bars when FMP provides them."
         )
         chart_is_intraday = is_intraday_interval(chart_cfg["interval"])
         st.session_state["chart_is_intraday"] = chart_is_intraday
@@ -5336,7 +5380,7 @@ def main():
                     'letter-spacing:0.1em;margin-bottom:8px">Auto Refresh</div>',
                     unsafe_allow_html=True)
         auto_refresh = st.checkbox("Enable auto-refresh", value=False,
-                                   help="Automatically reload data while the app is open. Faster intervals may hit Yahoo Finance rate limits.")
+                                   help="Automatically reload data while the app is open. Faster intervals may hit FMP API limits.")
         refresh_map = {"15 seconds": 15, "30 seconds": 30, "1 minute": 60, "5 minutes": 300}
         refresh_label = st.selectbox("Refresh speed", list(refresh_map.keys()), index=1,
                                      label_visibility="collapsed", disabled=not auto_refresh)
@@ -5408,7 +5452,7 @@ def main():
                 st.rerun()
         with st.expander("Data / disclaimer", expanded=False):
             st.markdown('<div style="font-size:10px;color:#334155;line-height:1.7">'
-                        'Price data: Yahoo Finance<br>Indicators: ta library<br>'
+                        'Price data: FMP API<br>Indicators: ta library<br>'
                         'AI Thesis: built-in rule engine<br>⚠️ Not financial advice.</div>',
                         unsafe_allow_html=True)
 
@@ -5459,7 +5503,7 @@ def main():
         <div class="top-header-price-main">${price:,.2f}</div>
         <div style="font-size:1.05rem;font-weight:600;color:{chg_clr};font-family:monospace;margin-top:6px;white-space:nowrap">
           {sign}{chg:.2f} &nbsp; ({sign}{chg_pct:.2f}%)</div>
-        <div style="font-size:11px;color:#334155;margin-top:5px;white-space:nowrap">{last_stamp} · Yahoo Finance</div>
+        <div style="font-size:11px;color:#334155;margin-top:5px;white-space:nowrap">{last_stamp} · FMP API</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -5708,7 +5752,7 @@ def main():
         q6.metric("Rev Growth",   with_avg(fpct(info.get("revenueGrowth")), "rev_growth", info))
 
         shead("Financial Reports")
-        st.caption("Access the three major statements directly inside valuation. Comparisons use the newest available Yahoo Finance statement data.")
+        st.caption("Access the three major statements directly inside valuation. Comparisons use the newest available FMP statement data.")
         stmt_mode = st.radio("Statement period", ["Quarterly", "Annual"], horizontal=True, index=0, key="financial_statement_mode")
         with st.spinner(f"Loading {ticker} financial reports..."):
             reports, reports_err = fetch_financial_reports(ticker)
@@ -6056,7 +6100,7 @@ def main():
             st.session_state.news_refresh_token = int(time.time())
             fetch_news_items.clear()
 
-        st.caption(tr("Priority: Yahoo Finance/yfinance first, then WSJ/RSS and broad financial news. Duplicate/overlapping headlines are filtered."))
+        st.caption(tr("Priority: FMP first, then WSJ/RSS and broad financial news. Duplicate/overlapping headlines are filtered."))
         with st.spinner(f"Updating latest news for {ticker}..."):
             news_items = fetch_news_items(ticker, news_keyword, st.session_state.news_refresh_token)
         if news_order == tr("Newest first") or news_order == "Newest first":
@@ -6084,7 +6128,7 @@ def main():
     # ══════════ TAB 8 — BROAD MARKET NEWS ════════════════════════
     if active_tab == "market_news":
         shead("Latest Market News")
-        st.caption(tr("Market news by importance/time with AI-style impact analysis. Sources prioritize yfinance/Yahoo Finance and WSJ first, then reliable broad RSS discovery."))
+        st.caption(tr("Market news by importance/time with AI-style impact analysis. Sources prioritize FMP and WSJ first, then reliable broad RSS discovery."))
         if "market_news_refresh_token" not in st.session_state:
             st.session_state.market_news_refresh_token = 0
 
@@ -6192,12 +6236,12 @@ def main():
                 shead(f"{direction_label} {metric} Ranking Table")
                 display_cols = ["Ticker", "Company", "Country", "Sector", "Market Cap $B", "Last Price", "Change %", "5D Momentum %", "Opening Gap %", "20D Vol %", "Volume Ratio", "Dollar Volume $M", "Liquidity Score", "Trader Composite Score", "Investment Note"]
                 table_df = top_df[[c for c in display_cols if c in top_df.columns]].copy()
-                table_df["Yahoo Link"] = table_df["Ticker"].apply(lambda x: f"https://finance.yahoo.com/quote/{x}")
+                table_df["FMP Link"] = table_df["Ticker"].apply(lambda x: f"https://financialmodelingprep.com/financial-summary/{x}")
                 st.dataframe(
                     table_df,
                     use_container_width=True,
                     hide_index=True,
-                    column_config={"Yahoo Link": st.column_config.LinkColumn("Yahoo", display_text="Open")},
+                    column_config={"FMP Link": st.column_config.LinkColumn("Yahoo", display_text="Open")},
                 )
                 st.markdown("<div style='font-size:11px;color:#64748b;margin:8px 0'>Click a U.S.-listed ticker bar to open that company in the main Overview.</div>", unsafe_allow_html=True)
                 ca, cb = st.columns(2)
