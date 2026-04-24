@@ -22,26 +22,38 @@ import time
 import requests
 import json, re, copy, math
 
-# ── Browser-like session for Yahoo Finance to avoid rate limiting ──
-_YF_SESSION = requests.Session()
-_YF_SESSION.headers.update({
+# ── Patch yfinance downloader with browser User-Agent ────────────
+import yfinance.utils as _yf_utils
+_orig_get_json = getattr(_yf_utils, "get_json", None)
+
+try:
+    import curl_cffi  # noqa: F401 — used by yfinance internally if installed
+except ImportError:
+    pass
+
+# Monkey-patch requests User-Agent so all yfinance calls look like Chrome
+_YF_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/120.0.0.0 Safari/537.36"
     ),
-    "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection":      "keep-alive",
-})
+}
+try:
+    import yfinance.data as _yfd
+    if hasattr(_yfd, "YfData"):
+        _orig_init = _yfd.YfData.__init__
+        def _patched_init(self, *args, **kwargs):
+            _orig_init(self, *args, **kwargs)
+            if hasattr(self, "session") and self.session is not None:
+                self.session.headers.update(_YF_HEADERS)
+        _yfd.YfData.__init__ = _patched_init
+except Exception:
+    pass
 
 def _yf_ticker(symbol):
-    """Create a yfinance Ticker with a browser-like session to reduce rate limiting."""
-    try:
-        return yf.Ticker(symbol, session=_YF_SESSION)
-    except Exception:
-        return yf.Ticker(symbol)
+    """Simple yfinance Ticker wrapper — kept for compatibility."""
+    return yf.Ticker(symbol)
 
 # ── Yahoo Finance rate-limit retry helper ─────────────────────────
 def _yf_history_safe(ticker_obj, retries=3, **kwargs):
@@ -570,28 +582,56 @@ def legend_html(items):
 #  DATA LAYER
 # ══════════════════════════════════════════════════════════════════
 def _fetch_stock_uncached(ticker, period="2y"):
-    """Inner fetch with retry — NOT cached so rate-limit errors are never stored."""
+    """Inner fetch with retry — NOT cached so rate-limit errors are never stored.
+    Uses fast_info first (lightweight) then falls back to full info.
+    """
     import time as _t
     stk = _yf_ticker(ticker)
-    # Retry info up to 3 times with backoff
+
+    # Step 1: validate ticker with fast_info (1 request, very light)
+    try:
+        fi = stk.fast_info
+        symbol_ok = bool(getattr(fi, "last_price", None) or getattr(fi, "market_cap", None))
+    except Exception:
+        symbol_ok = False
+
+    # Step 2: get full info with retry
     info = None
     for attempt in range(3):
         try:
             info = stk.info
-            if info and ("longName" in info or "shortName" in info):
+            if info and len(info) > 5:
                 break
+            _t.sleep(1)
         except Exception as e:
             msg = str(e).lower()
             if "too many requests" in msg or "rate" in msg or "429" in msg:
                 _t.sleep(2 ** attempt)
                 continue
-            raise
-    if not info or ("longName" not in info and "shortName" not in info):
-        return None, f"Ticker '{ticker}' not found or data unavailable."
-    # Retry history up to 3 times
+            break
+
+    # Accept info if it has useful keys, or fall back to fast_info dict
+    if not info or len(info) < 5:
+        if not symbol_ok:
+            return None, f"Ticker '{ticker}' not found. Check the symbol and try again."
+        # Build minimal info from fast_info
+        try:
+            fi = stk.fast_info
+            info = {
+                "shortName": ticker.upper(),
+                "longName":  ticker.upper(),
+                "regularMarketPrice": getattr(fi, "last_price", 0),
+                "marketCap": getattr(fi, "market_cap", 0),
+                "currency":  getattr(fi, "currency", "USD"),
+            }
+        except Exception:
+            return None, f"Ticker '{ticker}' not found. Check the symbol and try again."
+
+    # Step 3: get price history with retry
     hist = pd.DataFrame()
     for attempt in range(3):
         try:
+            _t.sleep(0.3)   # small polite delay between info and history
             hist = stk.history(period=period, auto_adjust=True)
             if not hist.empty:
                 break
@@ -600,9 +640,10 @@ def _fetch_stock_uncached(ticker, period="2y"):
             if "too many requests" in msg or "rate" in msg or "429" in msg:
                 _t.sleep(2 ** attempt)
                 continue
-            raise
+            break
+
     if hist.empty:
-        return None, "No price history returned."
+        return None, "No price history returned. Yahoo Finance may be temporarily unavailable."
     return {"info": info, "hist": hist}, None
 
 
