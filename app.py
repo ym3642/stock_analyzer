@@ -785,30 +785,21 @@ def _fmp_build_hist(ticker, period="2y"):
 
 
 def _fetch_stock_uncached(ticker, period="2y"):
-    """Fetch stock data using FMP (primary) with yfinance as fallback."""
-    # Try FMP first
+    """Fetch stock data using FMP only — no Yahoo Finance calls."""
     try:
-        info = _fmp_build_info(ticker)
+        # Step 1: get price history from FMP
         hist = _fmp_build_hist(ticker, period)
-        if info and not hist.empty:
-            return {"info": info, "hist": hist}, None
-    except Exception:
-        pass
-
-    # Fallback to yfinance if FMP fails
-    try:
-        import time as _t
-        stk  = _yf_ticker(ticker)
-        fi   = stk.fast_info
-        last = getattr(fi, "last_price", None)
-        if not last or float(last) <= 0:
-            return None, f"Ticker '{ticker}' not found. Check the symbol and try again."
-        info = stk.info or {}
-        _t.sleep(0.3)
-        hist = stk.history(period=period, auto_adjust=True)
         if hist.empty:
-            return None, "No price history returned."
+            return None, f"Ticker '{ticker}' not found. Check the symbol and try again."
+
+        # Step 2: get fundamentals from FMP
+        info = _fmp_build_info(ticker)
+        if not info:
+            # Still return with minimal info if history worked
+            info = {"shortName": ticker.upper(), "longName": ticker.upper()}
+
         return {"info": info, "hist": hist}, None
+
     except Exception as e:
         return None, str(e)
 
@@ -823,23 +814,26 @@ def fetch_stock(ticker, period="2y"):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_chart_history(ticker, period="1y", interval="1d", prepost=False):
-    """Fetch chart data separately so short windows can use intraday bars.
-    prepost=True includes pre-market and after-hours bars for intraday charts.
-    """
-    import time as _t
-    for attempt in range(3):
+    """Fetch chart data from FMP (primary) with yfinance fallback for intraday."""
+    # FMP for daily/weekly data
+    if interval in ("1d", "5d", "1wk", "1mo", "3mo"):
         try:
-            h = _yf_ticker(ticker).history(period=period, interval=interval, auto_adjust=True, prepost=prepost)
+            h = _fmp_build_hist(ticker, period)
             if not h.empty:
                 return h, None
-        except Exception as e:
-            msg = str(e).lower()
-            if "too many requests" in msg or "rate" in msg or "429" in msg:
-                if attempt < 2:
-                    _t.sleep(2 ** attempt)
-                    continue
-                raise RuntimeError(str(e))
-            return None, str(e)
+        except Exception:
+            pass
+
+    # yfinance fallback for intraday intervals (FMP intraday needs higher plan)
+    try:
+        import time as _t
+        h = _yf_ticker(ticker).history(period=period, interval=interval,
+                                        auto_adjust=True, prepost=prepost)
+        if not h.empty:
+            return h, None
+    except Exception as e:
+        pass
+
     return None, "No chart history returned."
 
 
