@@ -542,24 +542,42 @@ def legend_html(items):
 #  DATA LAYER — FMP ONLY
 # ══════════════════════════════════════════════════════════════════
 import os as _os
-_FMP_BASE = "https://financialmodelingprep.com/api/v3"
+_FMP_V3_BASE = "https://financialmodelingprep.com/api/v3"
+_FMP_STABLE_BASE = "https://financialmodelingprep.com/stable"
+_FMP_BASE = _FMP_V3_BASE  # backward-compatible default for legacy v3 endpoints
 
 def _get_fmp_key():
-    """Load FMP key from Streamlit secrets first, then environment variables.
+    """Load the FMP key the standard Streamlit way.
 
-    Local PowerShell:
-        $env:FMP_API_KEY="your_key"
+    Streamlit Cloud:
+        Manage app -> Settings -> Secrets
+        FMP_API_KEY = "your_key"
 
-    Streamlit Cloud secrets:
-        FMP_API_KEY="your_key"
+    Also supports local environment variables and nested secrets such as:
+        [fmp]
+        api_key = "your_key"
     """
     try:
-        key = st.secrets.get("FMP_API_KEY", "")
-        if key:
-            return str(key).strip()
+        for name in ("FMP_API_KEY", "fmp_api_key", "FINANCIAL_MODELING_PREP_API_KEY"):
+            key = st.secrets.get(name, "")
+            if key:
+                return str(key).strip()
     except Exception:
         pass
-    return str(_os.environ.get("FMP_API_KEY", "")).strip()
+    try:
+        fmp_section = st.secrets.get("fmp", {})
+        if isinstance(fmp_section, dict):
+            for name in ("api_key", "FMP_API_KEY", "key"):
+                key = fmp_section.get(name, "")
+                if key:
+                    return str(key).strip()
+    except Exception:
+        pass
+    for name in ("FMP_API_KEY", "fmp_api_key", "FINANCIAL_MODELING_PREP_API_KEY"):
+        key = _os.environ.get(name, "")
+        if key:
+            return str(key).strip()
+    return ""
 
 
 _FMP_SYMBOL_MAP = {
@@ -601,43 +619,74 @@ def _normalize_ohlcv(df):
     keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in out.columns]
     return out[keep].dropna(subset=["Close"])
 
-def _fmp_get(endpoint, params=None):
+def _remember_fmp_error(message):
+    """Store the latest FMP error without exposing the API key."""
+    try:
+        st.session_state["_last_fmp_error"] = clean_text(str(message))[:500]
+    except Exception:
+        pass
+
+
+def _fmp_get(endpoint, params=None, base="v3"):
     """Make a single FMP API call and return parsed JSON or None.
 
-    Important: this returns None for FMP error payloads, so the app does not
-    accidentally treat an API-key/subscription error as valid market data.
+    base="v3" uses legacy endpoints such as /api/v3/profile/AAPL.
+    base="stable" uses current endpoints such as /stable/historical-price-eod/full?symbol=AAPL.
+
+    This function rejects FMP error payloads so the app does not accidentally
+    treat an API-key/subscription error as valid market data.
     """
     try:
         key = _get_fmp_key()
         if not key:
+            _remember_fmp_error("FMP_API_KEY is missing in the Streamlit process.")
             return None
 
         p = dict(params or {})
         p["apikey"] = key
-        r = requests.get(f"{_FMP_BASE}/{endpoint}", params=p, timeout=20)
+
+        base_url = _FMP_STABLE_BASE if str(base).lower() == "stable" else _FMP_V3_BASE
+        endpoint = str(endpoint).lstrip("/")
+        url = f"{base_url}/{endpoint}"
+
+        r = requests.get(url, params=p, timeout=25)
 
         if r.status_code != 200:
+            _remember_fmp_error(f"FMP HTTP {r.status_code} from {base_url}/{endpoint}: {r.text[:300]}")
             return None
 
-        data = r.json()
+        try:
+            data = r.json()
+        except Exception:
+            _remember_fmp_error(f"FMP returned non-JSON response from {base_url}/{endpoint}: {r.text[:300]}")
+            return None
 
         # FMP error responses are usually dicts like {"Error Message": ...}
         # or {"error": ...}. Do not pass them downstream as real data.
         if isinstance(data, dict):
             lowered = {str(k).lower(): v for k, v in data.items()}
-            if any(k in lowered for k in ["error message", "error", "message"]):
-                # If the payload also contains a valid data key, keep it; otherwise reject.
-                valid_keys = {"historical", "symbol", "date", "price", "results"}
-                if not any(k in lowered for k in valid_keys):
-                    return None
+            error_keys = {"error message", "error"}
+            if any(k in lowered for k in error_keys):
+                _remember_fmp_error(str(data)[:500])
+                return None
+            # Some endpoints return {"message": "..."} for plan/key problems.
+            if "message" in lowered and not any(k in lowered for k in ["historical", "symbol", "date", "price", "results"]):
+                _remember_fmp_error(str(data)[:500])
+                return None
             return data if data else None
 
         if isinstance(data, list):
             return data if len(data) > 0 else None
 
         return None
-    except Exception:
+    except Exception as e:
+        _remember_fmp_error(f"FMP request failed: {e}")
         return None
+
+
+def _fmp_get_stable(endpoint, params=None):
+    return _fmp_get(endpoint, params=params, base="stable")
+
 
 
 def _fmp_build_info(ticker):
@@ -761,49 +810,61 @@ def _fmp_build_info(ticker):
 
 
 def _fmp_build_hist(ticker, period="2y"):
-    """Fetch OHLCV history from FMP and return as app-compatible DataFrame."""
+    """Fetch OHLCV daily history from FMP only.
+
+    Uses FMP's usual v3 endpoint first:
+        /api/v3/historical-price-full/AAPL?timeseries=730&apikey=...
+
+    Then tries date-filtered v3 and stable endpoints.
+    """
     try:
-        # Map period to FMP from/to dates
         from datetime import datetime, timedelta
+        sym = _fmp_symbol(ticker)
         days = _period_to_days(period, default=730)
         date_from = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
-        date_to   = datetime.today().strftime("%Y-%m-%d")
+        date_to = datetime.today().strftime("%Y-%m-%d")
 
-        data = _fmp_get(f"historical-price-full/{_fmp_symbol(ticker)}",
-                        {"from": date_from, "to": date_to})
+        candidates = [
+            ("v3", f"historical-price-full/{sym}", {"timeseries": int(days)}),
+            ("v3", f"historical-price-full/{sym}", {"from": date_from, "to": date_to}),
+            ("stable", "historical-price-eod/full", {"symbol": sym, "from": date_from, "to": date_to}),
+            ("stable", "historical-price-eod/light", {"symbol": sym, "from": date_from, "to": date_to}),
+        ]
 
-        if not data:
-            return pd.DataFrame()
+        for base, endpoint, params in candidates:
+            data = _fmp_get(endpoint, params=params, base=base)
+            if not data:
+                continue
+            historical = []
+            if isinstance(data, dict):
+                historical = data.get("historical") or data.get("data") or data.get("results") or []
+                if not historical and any(k in data for k in ("date", "close", "adjClose")):
+                    historical = [data]
+            elif isinstance(data, list):
+                historical = data
+            if historical:
+                df = _normalize_ohlcv(pd.DataFrame(historical))
+                if not df.empty:
+                    return df
 
-        # FMP returns {"symbol": ..., "historical": [...]}
-        if isinstance(data, dict):
-            historical = data.get("historical", [])
-        elif isinstance(data, list):
-            historical = data
-        else:
-            return pd.DataFrame()
+        quote = _fmp_get(f"quote/{sym}", base="v3")
+        if isinstance(quote, list) and quote:
+            q = quote[0]
+            price = q.get("price") or q.get("previousClose")
+            if price is not None:
+                today = pd.Timestamp.today().normalize()
+                return pd.DataFrame({
+                    "Open": [q.get("open", price)],
+                    "High": [q.get("dayHigh", price)],
+                    "Low": [q.get("dayLow", price)],
+                    "Close": [price],
+                    "Volume": [q.get("volume", 0)],
+                }, index=[today]).apply(pd.to_numeric, errors="coerce")
 
-        if not historical:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(historical)
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.set_index("date").sort_index()
-        df = df.rename(columns={
-            "open":   "Open",
-            "high":   "High",
-            "low":    "Low",
-            "close":  "Close",
-            "volume": "Volume",
-        })
-        for col in ["Open", "High", "Low", "Close", "Volume"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df[["Open", "High", "Low", "Close", "Volume"]].dropna()
-    except Exception:
         return pd.DataFrame()
-
-
+    except Exception as e:
+        _remember_fmp_error(f"FMP historical loader failed for {ticker}: {e}")
+        return pd.DataFrame()
 
 def _fmp_build_intraday(ticker, period="5d", interval="5m"):
     """Fetch intraday bars from FMP. Requires an FMP plan that includes historical-chart endpoints."""
@@ -921,7 +982,13 @@ def _fetch_stock_uncached(ticker, period="2y"):
         # Step 1: get price history from FMP
         hist = _fmp_build_hist(ticker, period)
         if hist.empty:
-            return None, f"No FMP price history returned for '{ticker}'. This usually means the FMP key is invalid, missing in the Streamlit process, or your FMP plan cannot access this endpoint."
+            last_err = ""
+            try:
+                last_err = st.session_state.get("_last_fmp_error", "")
+            except Exception:
+                last_err = ""
+            detail = f" Last FMP message: {last_err}" if last_err else ""
+            return None, f"No FMP price history returned for '{ticker}'. This usually means the FMP key is invalid/missing in Streamlit, the endpoint is blocked by your plan, or FMP returned an empty response.{detail}"
 
         # Step 2: get fundamentals from FMP
         info = _fmp_build_info(ticker)
@@ -1047,7 +1114,7 @@ def _format_market_cap_short(value):
 
 def _company_search_label(row):
     cap = _format_market_cap_short(row.get("Market Cap"))
-    exch = row.get("Exchange") or "Yahoo"
+    exch = row.get("Exchange") or "FMP"
     return f"{row.get('Ticker','')} · {row.get('Company','')} · {exch} · {cap}"
 
 
@@ -5355,7 +5422,7 @@ def main():
             placeholder="apple, microsoft, nvidia, service now…",
             label_visibility="collapsed",
             key="company_search_query",
-            help="Search by company name or keyword. Results are ordered by market cap when Yahoo provides/enriches market cap.",
+            help="Search by company name or keyword. Results are ordered by market cap when FMP provides market cap.",
         ).strip()
         if company_query:
             search_rows = search_companies_by_keyword(company_query, max_results=12)
@@ -6283,7 +6350,7 @@ def main():
                     table_df,
                     use_container_width=True,
                     hide_index=True,
-                    column_config={"FMP Link": st.column_config.LinkColumn("Yahoo", display_text="Open")},
+                    column_config={"FMP Link": st.column_config.LinkColumn("FMP", display_text="Open")},
                 )
                 st.markdown("<div style='font-size:11px;color:#64748b;margin:8px 0'>Click a U.S.-listed ticker bar to open that company in the main Overview.</div>", unsafe_allow_html=True)
                 ca, cb = st.columns(2)
