@@ -542,8 +542,24 @@ def legend_html(items):
 #  DATA LAYER — FMP ONLY
 # ══════════════════════════════════════════════════════════════════
 import os as _os
-_FMP_KEY = _os.environ.get("FMP_API_KEY", "")
 _FMP_BASE = "https://financialmodelingprep.com/api/v3"
+
+def _get_fmp_key():
+    """Load FMP key from Streamlit secrets first, then environment variables.
+
+    Local PowerShell:
+        $env:FMP_API_KEY="your_key"
+
+    Streamlit Cloud secrets:
+        FMP_API_KEY="your_key"
+    """
+    try:
+        key = st.secrets.get("FMP_API_KEY", "")
+        if key:
+            return str(key).strip()
+    except Exception:
+        pass
+    return str(_os.environ.get("FMP_API_KEY", "")).strip()
 
 
 _FMP_SYMBOL_MAP = {
@@ -586,17 +602,39 @@ def _normalize_ohlcv(df):
     return out[keep].dropna(subset=["Close"])
 
 def _fmp_get(endpoint, params=None):
-    """Make a single FMP API call and return parsed JSON or None."""
+    """Make a single FMP API call and return parsed JSON or None.
+
+    Important: this returns None for FMP error payloads, so the app does not
+    accidentally treat an API-key/subscription error as valid market data.
+    """
     try:
-        p = params or {}
-        p["apikey"] = _FMP_KEY
-        r = requests.get(f"{_FMP_BASE}/{endpoint}", params=p, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                return data
-            if isinstance(data, dict) and data:
-                return data
+        key = _get_fmp_key()
+        if not key:
+            return None
+
+        p = dict(params or {})
+        p["apikey"] = key
+        r = requests.get(f"{_FMP_BASE}/{endpoint}", params=p, timeout=20)
+
+        if r.status_code != 200:
+            return None
+
+        data = r.json()
+
+        # FMP error responses are usually dicts like {"Error Message": ...}
+        # or {"error": ...}. Do not pass them downstream as real data.
+        if isinstance(data, dict):
+            lowered = {str(k).lower(): v for k, v in data.items()}
+            if any(k in lowered for k in ["error message", "error", "message"]):
+                # If the payload also contains a valid data key, keep it; otherwise reject.
+                valid_keys = {"historical", "symbol", "date", "price", "results"}
+                if not any(k in lowered for k in valid_keys):
+                    return None
+            return data if data else None
+
+        if isinstance(data, list):
+            return data if len(data) > 0 else None
+
         return None
     except Exception:
         return None
@@ -874,12 +912,16 @@ class _FMPTicker:
 
 
 def _fetch_stock_uncached(ticker, period="2y"):
-    """Fetch stock data using FMP only — no FMP calls."""
+    """Fetch stock data using FMP only — no yfinance calls."""
     try:
+        # Step 0: make sure the FMP key is actually available to Streamlit.
+        if not _get_fmp_key():
+            return None, "FMP_API_KEY is missing. Add it to your environment variables or Streamlit secrets, then restart Streamlit."
+
         # Step 1: get price history from FMP
         hist = _fmp_build_hist(ticker, period)
         if hist.empty:
-            return None, f"Ticker '{ticker}' not found. Check the symbol and try again."
+            return None, f"No FMP price history returned for '{ticker}'. This usually means the FMP key is invalid, missing in the Streamlit process, or your FMP plan cannot access this endpoint."
 
         # Step 2: get fundamentals from FMP
         info = _fmp_build_info(ticker)
