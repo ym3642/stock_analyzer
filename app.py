@@ -2135,7 +2135,6 @@ def technical_signal_model(df, fallback_price=None):
 # ══════════════════════════════════════════════════════════════════
 #  TECHNICALS
 # ══════════════════════════════════════════════════════════════════
-@st.cache_data(ttl=1800, show_spinner=False)
 @st.cache_data(ttl=3600, show_spinner=False)
 def calc_ta(df):
     """Calculate indicators safely, even on short daily/intraday windows."""
@@ -6456,8 +6455,19 @@ def main():
     st.session_state.ticker = ticker
 
     # ── Fetch ──────────────────────────────────────────────────────
-    with st.spinner(f"Fetching {ticker}…"):
-        data, err = fetch_stock(ticker, period)
+    # Only show a loading indicator when the ticker or period genuinely changes.
+    # All other interactions (tab switches, checkboxes, dropdowns on the same
+    # ticker) hit the @st.cache_data cache instantly → no grey overlay, no freeze.
+    _load_key = (ticker, period)
+    _is_fresh_load = st.session_state.get("_last_load_key") != _load_key
+    if _is_fresh_load:
+        with st.spinner(f"Loading {ticker}…"):
+            data, err = fetch_stock(ticker, period)
+        if not err and data:
+            st.session_state["_last_load_key"] = _load_key
+    else:
+        data, err = fetch_stock(ticker, period)  # guaranteed instant cache hit
+
     if err or not data:
         st.error(f"**{ticker}**: {err or 'Not found'}"); return
 
@@ -6572,23 +6582,20 @@ def main():
 
     # Load the exact data needed by the selected section after active_tab is known.
     if active_tab == "overview":
-        with st.spinner("Loading chart…"):
-            chart_hist, chart_err = fetch_chart_history(ticker, chart_cfg["period"], chart_cfg["interval"], show_ext_hours)
-            if chart_err or chart_hist is None or chart_hist.empty:
-                chart_hist = hist
-                st.warning(f"Recent chart data was unavailable, so the chart fell back to {period_label}: {chart_err}")
-            elif chart_is_intraday and not show_ext_hours and uses_us_regular_session_symbol(ticker):
-                chart_hist = regular_session_only(chart_hist)
-            chart_ta = calc_ta(chart_hist)
+        chart_hist, chart_err = fetch_chart_history(ticker, chart_cfg["period"], chart_cfg["interval"], show_ext_hours)
+        if chart_err or chart_hist is None or chart_hist.empty:
+            chart_hist = hist
+            st.warning(f"Recent chart data was unavailable, so the chart fell back to {period_label}: {chart_err}")
+        elif chart_is_intraday and not show_ext_hours and uses_us_regular_session_symbol(ticker):
+            chart_hist = regular_session_only(chart_hist)
+        chart_ta = calc_ta(chart_hist)
 
     if active_tab == "ai_thesis":
-        with st.spinner("Calculating thesis indicators…"):
-            hist_ta = calc_ta(hist)
+        hist_ta = calc_ta(hist)
 
     if active_tab in {"industry", "ai_thesis"}:
-        with st.spinner("Running risk analytics vs S&P 500…"):
-            spy = fetch_spy(period)
-            risk = calc_risk(hist, spy)
+        spy = fetch_spy(period)
+        risk = calc_risk(hist, spy)
 
     # ══════════ SECTION 1 — OVERVIEW ═══════════════════════════════
     if active_tab == "overview":
@@ -6818,14 +6825,12 @@ def main():
         rcfg1, rcfg2 = st.columns([1, 4])
         risk_chart_period = rcfg1.selectbox("Risk chart range", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "20y"], index=1, key="risk_chart_period")
         rcfg2.caption("Risk charts use their own range. Default is 3 months.")
-        with st.spinner(f"Updating risk charts for {risk_chart_period}..."):
-            risk_hist_local, risk_err = fetch_chart_history(ticker, risk_chart_period, "1d")
-            if risk_err or risk_hist_local is None or risk_hist_local.empty:
-                risk_hist_local = hist
-                risk_err = None
-            risk_ta_local = calc_ta(risk_hist_local)
-            risk_spy_local = fetch_spy(risk_chart_period)
-            risk_view = calc_risk(risk_hist_local, risk_spy_local)
+        risk_hist_local, risk_err = fetch_chart_history(ticker, risk_chart_period, "1d")
+        if risk_err or risk_hist_local is None or risk_hist_local.empty:
+            risk_hist_local = hist
+        risk_ta_local = calc_ta(risk_hist_local)
+        risk_spy_local = fetch_spy(risk_chart_period)
+        risk_view = calc_risk(risk_hist_local, risk_spy_local)
         risk_metric = risk_view
 
         shead("Risk & Performance Metrics vs S&P 500")
@@ -6909,8 +6914,7 @@ def main():
         peer_raw=st.text_input("Peer Tickers (comma-separated)", value=peer_defaults)
         peer_list=tuple(p.strip().upper() for p in peer_raw.split(",")
                         if p.strip() and p.strip().upper()!=ticker)[:7]
-        with st.spinner("Fetching peer data…"):
-            peers=fetch_peers(peer_list,"1y")
+        peers=fetch_peers(peer_list,"1y")
 
         y1_self=(hist["Close"].iloc[-1]/hist["Close"].iloc[0]-1)*100 if len(hist)>1 else 0
         table_rows=[{"Ticker":f"★ {ticker}","Company":name[:28],"Price":f"${price:.2f}",
@@ -6920,7 +6924,7 @@ def main():
                      "Net Margin":fpct(info.get("profitMargins")),
                      "Rev Growth":fpct(info.get("revenueGrowth")),
                      "Div Yield":fpct(info.get("dividendYield")) if info.get("dividendYield") else "—",
-                     "Beta":f"{risk['beta']:.2f}"}]
+                     "Beta":f"{risk.get('beta', 0):.2f}"}]
         for sym,pd_ in peers.items():
             pi,ph=pd_["info"],pd_["hist"]
             if ph.empty: continue
@@ -6951,12 +6955,11 @@ def main():
         tcfg1, tcfg2 = st.columns([1, 4])
         tech_chart_period = tcfg1.selectbox("Technical chart range", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "20y"], index=1, key="tech_chart_period")
         tcfg2.caption("Technical indicators and charts use their own range. Default is 3 months.")
-        with st.spinner(f"Updating technical charts for {tech_chart_period}..."):
-            tech_hist_local, tech_err = fetch_chart_history(ticker, tech_chart_period, "1d")
-            if tech_err or tech_hist_local is None or tech_hist_local.empty:
-                tech_hist_local = hist
-            tech_ta = calc_ta(tech_hist_local)
-            tech_days = 99999
+        tech_hist_local, tech_err = fetch_chart_history(ticker, tech_chart_period, "1d")
+        if tech_err or tech_hist_local is None or tech_hist_local.empty:
+            tech_hist_local = hist
+        tech_ta = calc_ta(tech_hist_local)
+        tech_days = 99999
 
         last = tech_ta.iloc[-1]
         tech_price = _finite(last.get("Close"))
@@ -7084,8 +7087,17 @@ def main():
         comp_period = ctc.selectbox("Compare period", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=1, key="comp_period")
 
         if comp1 and comp2:
-            d1, e1 = fetch_stock(comp1, comp_period)
-            d2, e2 = fetch_stock(comp2, comp_period)
+            _comp_key = (comp1, comp2, comp_period)
+            _comp_fresh = st.session_state.get("_last_comp_key") != _comp_key
+            if _comp_fresh:
+                with st.spinner(f"Loading {comp1} and {comp2}…"):
+                    d1, e1 = fetch_stock(comp1, comp_period)
+                    d2, e2 = fetch_stock(comp2, comp_period)
+                if not e1 and not e2:
+                    st.session_state["_last_comp_key"] = _comp_key
+            else:
+                d1, e1 = fetch_stock(comp1, comp_period)
+                d2, e2 = fetch_stock(comp2, comp_period)
             if e1 or e2 or not d1 or not d2:
                 st.error(f"Comparison error: {comp1}: {e1 or 'OK'}; {comp2}: {e2 or 'OK'}")
             else:
