@@ -744,8 +744,20 @@ def _normalize_ohlcv(df):
     out["Close"] = pick("adjClose", "adjustedClose", "close", "price", "Close")
     out["Volume"] = pick("volume", "Volume")
     adj_close = pick("adjClose", "adjustedClose")
+    raw_close = pick("close", "Close")
     if adj_close is not None:
         out["Adj Close"] = adj_close
+        # If FMP gives adjusted close but not adjusted OHLC, scale raw OHLC by
+        # adjClose / raw close. This prevents split-adjusted closes from being
+        # plotted against unadjusted opens/highs/lows on long-range candles.
+        has_adj_ohl = any(c in raw.columns for c in ("adjOpen", "adjustedOpen", "adjHigh", "adjustedHigh", "adjLow", "adjustedLow"))
+        if raw_close is not None and not has_adj_ohl:
+            try:
+                factor = pd.to_numeric(adj_close, errors="coerce") / pd.to_numeric(raw_close, errors="coerce").replace(0, np.nan)
+                for _col in ("Open", "High", "Low"):
+                    out[_col] = pd.to_numeric(out[_col], errors="coerce") * factor
+            except Exception:
+                pass
 
     if "date" in out.columns:
         out = out.dropna(subset=["date"]).set_index("date")
@@ -993,9 +1005,9 @@ def _fmp_build_info(ticker):
             ("company/profile", {"symbol": sym}, "v3"),
         ])
         quote = merge_records([
-            (f"quote/{sym}", {}, "v3"),
             ("quote", {"symbol": sym}, "stable"),
             ("quote-short", {"symbol": sym}, "stable"),
+            (f"quote/{sym}", {}, "v3"),
             (f"quote-short/{sym}", {}, "v3"),
         ])
         market_cap_row = merge_records([
@@ -1004,8 +1016,8 @@ def _fmp_build_info(ticker):
             ("market-capitalization-batch", {"symbols": sym}, "stable"),
         ])
         ev = merge_records([
-            (f"enterprise-values/{sym}", {"limit": 4}, "v3"),
             ("enterprise-values", {"symbol": sym, "limit": 4}, "stable"),
+            (f"enterprise-values/{sym}", {"limit": 4}, "v3"),
         ])
 
         hi_from_range, lo_from_range = _parse_range_high_low(profile.get("range"))
@@ -1057,23 +1069,23 @@ def _fmp_build_info(ticker):
 
         # ── Ratios / key metrics / estimates ────────────────────────────
         km = merge_records([
-            (f"key-metrics-ttm/{sym}", {}, "v3"),
             ("key-metrics-ttm", {"symbol": sym}, "stable"),
-            (f"key-metrics/{sym}", {"limit": 4}, "v3"),
             ("key-metrics", {"symbol": sym, "limit": 4}, "stable"),
+            (f"key-metrics-ttm/{sym}", {}, "v3"),
+            (f"key-metrics/{sym}", {"limit": 4}, "v3"),
         ])
         ratios = merge_records([
-            (f"ratios-ttm/{sym}", {}, "v3"),
             ("ratios-ttm", {"symbol": sym}, "stable"),
             ("metrics-ratios-ttm", {"symbol": sym}, "stable"),
-            (f"ratios/{sym}", {"limit": 4}, "v3"),
             ("ratios", {"symbol": sym, "limit": 4}, "stable"),
             ("metrics-ratios", {"symbol": sym, "limit": 4}, "stable"),
+            (f"ratios-ttm/{sym}", {}, "v3"),
+            (f"ratios/{sym}", {"limit": 4}, "v3"),
         ])
         growth = merge_records([
-            (f"financial-growth/{sym}", {"limit": 4}, "v3"),
             ("financial-growth", {"symbol": sym, "limit": 4}, "stable"),
             ("income-statement-growth", {"symbol": sym, "limit": 4}, "stable"),
+            (f"financial-growth/{sym}", {"limit": 4}, "v3"),
             (f"income-statement-growth/{sym}", {"limit": 4}, "v3"),
         ])
 
@@ -1110,16 +1122,16 @@ def _fmp_build_info(ticker):
 
         # ── Financial statements: TTM + latest annual + latest quarterly ─
         income_ttm = merge_records([
-            (f"income-statement-ttm/{sym}", {}, "v3"),
             ("income-statement-ttm", {"symbol": sym}, "stable"),
+            (f"income-statement-ttm/{sym}", {}, "v3"),
         ])
         balance_ttm = merge_records([
-            (f"balance-sheet-statement-ttm/{sym}", {}, "v3"),
             ("balance-sheet-statement-ttm", {"symbol": sym}, "stable"),
+            (f"balance-sheet-statement-ttm/{sym}", {}, "v3"),
         ])
         cash_ttm = merge_records([
-            (f"cash-flow-statement-ttm/{sym}", {}, "v3"),
             ("cash-flow-statement-ttm", {"symbol": sym}, "stable"),
+            (f"cash-flow-statement-ttm/{sym}", {}, "v3"),
         ])
 
         income_annual = first_rows("income-statement", limit=6, period="annual")
@@ -1210,7 +1222,8 @@ def _fmp_build_info(ticker):
             "netIncomeToCommon": net_income,
             "ebitda": ebitda,
             "trailingEps": eps_now,
-            "forwardEps": N(quote.get("epsEstimatedNextYear"), quote.get("forwardEps"), km.get("estimatedEpsAvg"), default=None),
+            # Forward EPS should come from direct quote fields or the analyst-estimates endpoint below.
+            "forwardEps": N(quote.get("epsEstimatedNextYear"), quote.get("forwardEps"), default=None),
             "revenueGrowth": revenue_growth,
             "earningsGrowth": earnings_growth,
             "totalDebt": total_debt,
@@ -1333,6 +1346,9 @@ def _fmp_build_info(ticker):
                     rec_key = "strong sell"
                 rec_source = "FMP grades-consensus" if any(k in r for k in ("strongBuy", "strongSell")) else "FMP legacy analyst-stock-recommendations"
 
+        if rec_total:
+            info["recommendationAnalystCount"] = rec_total
+
         if info.get("forwardEps") is None:
             _merge_nonempty(info, {
                 "forwardEps": N(
@@ -1349,13 +1365,19 @@ def _fmp_build_info(ticker):
             "recommendationKey": rec_key or "",
             "recommendationMean": rec_mean,
             "recommendationSource": rec_source,
+            "recommendationAnalystCount": rec_total,
         })
         if info.get("numberOfAnalystOpinions") in (None, "", 0, 0.0) and rec_total:
             info["numberOfAnalystOpinions"] = rec_total
-        if info.get("forwardPE") in (None, "", 0, 0.0):
-            fwd_eps_for_pe = N(info.get("forwardEps"), default=None)
+        fwd_eps_for_pe = N(info.get("forwardEps"), default=None)
+        if fwd_eps_for_pe is not None and fwd_eps_for_pe <= 0:
+            info["forwardEps"] = None
+            info["forwardPE"] = None
+        elif info.get("forwardPE") in (None, "", 0, 0.0):
             if price not in (None, 0) and fwd_eps_for_pe not in (None, 0):
                 info["forwardPE"] = price / fwd_eps_for_pe
+        if N(info.get("forwardPE"), default=None) is not None and N(info.get("forwardPE"), default=None) <= 0:
+            info["forwardPE"] = None
 
 
         # Final fallback computations that help old model calculations.
@@ -1442,14 +1464,14 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
         if v not in (None, ""):
             info[k] = v
 
-    q = merge_one([(f"quote/{sym}", {}, "v3"), ("quote", {"symbol": sym}, "stable"), ("quote-short", {"symbol": sym}, "stable")])
-    prof = merge_one([(f"profile/{sym}", {}, "v3"), ("profile", {"symbol": sym}, "stable")])
-    km = merge_one([(f"key-metrics-ttm/{sym}", {}, "v3"), ("key-metrics-ttm", {"symbol": sym}, "stable")])
-    rt = merge_one([(f"ratios-ttm/{sym}", {}, "v3"), ("ratios-ttm", {"symbol": sym}, "stable"), ("metrics-ratios-ttm", {"symbol": sym}, "stable")])
-    inc = merge_one([(f"income-statement-ttm/{sym}", {}, "v3"), ("income-statement-ttm", {"symbol": sym}, "stable"), (f"income-statement/{sym}", {"limit": 1}, "v3")])
-    bal = merge_one([(f"balance-sheet-statement/{sym}", {"limit": 1, "period": "quarter"}, "v3"), (f"balance-sheet-statement/{sym}", {"limit": 1}, "v3"), ("balance-sheet-statement", {"symbol": sym, "limit": 1, "period": "quarter"}, "stable")])
-    cf = merge_one([(f"cash-flow-statement-ttm/{sym}", {}, "v3"), ("cash-flow-statement-ttm", {"symbol": sym}, "stable"), (f"cash-flow-statement/{sym}", {"limit": 1}, "v3")])
-    gr = merge_one([(f"financial-growth/{sym}", {"limit": 1}, "v3"), ("financial-growth", {"symbol": sym, "limit": 1}, "stable")])
+    q = merge_one([("quote", {"symbol": sym}, "stable"), ("quote-short", {"symbol": sym}, "stable"), (f"quote/{sym}", {}, "v3")])
+    prof = merge_one([("profile", {"symbol": sym}, "stable"), (f"profile/{sym}", {}, "v3")])
+    km = merge_one([("key-metrics-ttm", {"symbol": sym}, "stable"), (f"key-metrics-ttm/{sym}", {}, "v3")])
+    rt = merge_one([("ratios-ttm", {"symbol": sym}, "stable"), ("metrics-ratios-ttm", {"symbol": sym}, "stable"), (f"ratios-ttm/{sym}", {}, "v3")])
+    inc = merge_one([("income-statement-ttm", {"symbol": sym}, "stable"), (f"income-statement-ttm/{sym}", {}, "v3"), (f"income-statement/{sym}", {"limit": 1}, "v3")])
+    bal = merge_one([("balance-sheet-statement", {"symbol": sym, "limit": 1, "period": "quarter"}, "stable"), (f"balance-sheet-statement/{sym}", {"limit": 1, "period": "quarter"}, "v3"), (f"balance-sheet-statement/{sym}", {"limit": 1}, "v3")])
+    cf = merge_one([("cash-flow-statement-ttm", {"symbol": sym}, "stable"), (f"cash-flow-statement-ttm/{sym}", {}, "v3"), (f"cash-flow-statement/{sym}", {"limit": 1}, "v3")])
+    gr = merge_one([("financial-growth", {"symbol": sym, "limit": 1}, "stable"), (f"financial-growth/{sym}", {"limit": 1}, "v3")])
 
     ae_annual_rows = []
     ae_quarter_rows = []
@@ -1575,10 +1597,15 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
         info["sharesOutstanding"] = mcap / price
     if info.get("trailingPE") in (None, "", 0, 0.0) and price not in (None, 0) and eps not in (None, 0):
         info["trailingPE"] = price / eps
-    if info.get("forwardPE") in (None, "", 0, 0.0):
-        fwd_eps_for_pe = n(info.get("forwardEps"), default=None)
+    fwd_eps_for_pe = n(info.get("forwardEps"), default=None)
+    if fwd_eps_for_pe is not None and fwd_eps_for_pe <= 0:
+        info["forwardEps"] = None
+        info["forwardPE"] = None
+    elif info.get("forwardPE") in (None, "", 0, 0.0):
         if price not in (None, 0) and fwd_eps_for_pe not in (None, 0):
             info["forwardPE"] = price / fwd_eps_for_pe
+    if n(info.get("forwardPE"), default=None) is not None and n(info.get("forwardPE"), default=None) <= 0:
+        info["forwardPE"] = None
     if info.get("priceToSalesTrailing12Months") in (None, "", 0, 0.0) and mcap not in (None, 0) and rev not in (None, 0):
         info["priceToSalesTrailing12Months"] = mcap / rev
     if info.get("pegRatio") in (None, "", 0, 0.0):
@@ -1604,6 +1631,7 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
     if total_rec:
         rm = (1 * sb + 2 * by + 3 * hd + 4 * sl + 5 * ss) / total_rec
         info["recommendationMean"] = rm
+        info["recommendationAnalystCount"] = total_rec
         info["numberOfAnalystOpinions"] = info.get("numberOfAnalystOpinions") or total_rec
         info["recommendationKey"] = "strong buy" if rm <= 1.5 else "buy" if rm <= 2.5 else "hold" if rm < 3.5 else "sell" if rm < 4.5 else "strong sell"
         info["recommendationSource"] = "FMP grades-consensus" if any(k in recrow for k in ("strongBuy", "strongSell")) else "FMP legacy analyst-stock-recommendations"
@@ -2207,7 +2235,7 @@ def calc_risk(hist, spy):
 #  DCF
 # ══════════════════════════════════════════════════════════════════
 def dcf_value(fcf, g, tg, wacc, yrs=10):
-    if fcf<=0: return 0.0
+    if fcf<=0 or wacc <= tg: return 0.0
     pv=0.0
     for yr in range(1,yrs+1):
         fcf*=(1+g/100); pv+=fcf/(1+wacc/100)**yr
@@ -5669,6 +5697,18 @@ def is_intraday_interval(interval):
     return str(interval).lower() not in ("1d", "5d", "1wk", "1mo", "3mo")
 
 
+def uses_us_regular_session_symbol(symbol):
+    """True for U.S.-style equities/ETFs; false for crypto, commodities, indexes, and foreign suffixes."""
+    s = str(symbol or "").upper().strip()
+    if not s:
+        return True
+    if s.startswith("^") or "=" in s or "-" in s or "." in s:
+        return False
+    if s.endswith("USD") and len(s) > 4:
+        return False
+    return True
+
+
 def regular_session_only(df):
     """Keep only regular U.S. session bars, 9:30 AM to 4:00 PM New York time."""
     if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex):
@@ -5723,29 +5763,47 @@ def _figure_datetime_info(fig):
     return False, False
 
 
+def _figure_has_weekend_x(fig):
+    """Detect 7-day assets so crypto/commodity charts do not hide weekend data."""
+    try:
+        for trace in getattr(fig, "data", []) or []:
+            x = getattr(trace, "x", None)
+            if x is None:
+                continue
+            vals = list(x)
+            if not vals:
+                continue
+            dt = pd.to_datetime(pd.Series(vals), errors="coerce").dropna()
+            if not dt.empty and bool(dt.dt.dayofweek.isin([5, 6]).any()):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def apply_market_axis(fig):
-    """Apply date-axis range breaks only to figures that actually have datetime x-values."""
+    """Apply date-axis range breaks only when the figure is exchange-session data."""
     has_dt, looks_intraday = _figure_datetime_info(fig)
     if not has_dt:
         return fig
 
     show_ext = bool(st.session_state.get("show_ext_hours", False))
+    has_weekend_data = _figure_has_weekend_x(fig)
+    weekend_break = [] if has_weekend_data else [dict(bounds=["sat", "mon"])]
     if looks_intraday and not show_ext:
         fig.update_xaxes(
-            rangebreaks=[
-                dict(bounds=["sat", "mon"]),
-                dict(bounds=[16, 9.5], pattern="hour"),
-            ],
+            rangebreaks=weekend_break + [dict(bounds=[16, 9.5], pattern="hour")],
             tickformat="%b %d<br>%I:%M %p",
             hoverformat="%b %d, %Y %I:%M %p",
         )
     elif looks_intraday:
         fig.update_xaxes(
+            rangebreaks=weekend_break,
             tickformat="%b %d<br>%I:%M %p",
             hoverformat="%b %d, %Y %I:%M %p",
         )
-    else:
-        fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+    elif weekend_break:
+        fig.update_xaxes(rangebreaks=weekend_break)
     return fig
 
 def shead(t):
@@ -5817,7 +5875,10 @@ def pchart(fig, key):
     if not figure_has_displayable_data(fig):
         no_chart_message("Try a longer period or a different interval.")
         return
-    fig.update_layout(title=dict(text=""), showlegend=False)
+    preserve_legend = bool(getattr(fig.layout, "showlegend", False))
+    fig.update_layout(title=dict(text=""))
+    if not preserve_legend:
+        fig.update_layout(showlegend=False)
     fig.update_xaxes(title=dict(text=""))
     fig.update_yaxes(title=dict(text=""))
     fig = apply_market_axis(fig)
@@ -6300,8 +6361,9 @@ def main():
                     unsafe_allow_html=True)
         ma_defaults = {"MA5":True,"MA10":False,"MA20":True,
                        "MA50":False,"MA120":True,"MA200":False}
-        ma_labels   = {"MA5":"5-Day SMA","MA10":"10-Day SMA","MA20":"20-Day SMA",
-                       "MA50":"50-Day SMA","MA120":"120-Day SMA","MA200":"200-Day SMA"}
+        _ma_unit = "Bar" if is_intraday_interval(chart_cfg["interval"]) else "Day"
+        ma_labels   = {"MA5":f"5-{_ma_unit} SMA","MA10":f"10-{_ma_unit} SMA","MA20":f"20-{_ma_unit} SMA",
+                       "MA50":f"50-{_ma_unit} SMA","MA120":f"120-{_ma_unit} SMA","MA200":f"200-{_ma_unit} SMA"}
         active_mas = []
         for ma in ["MA5","MA10","MA20","MA50","MA120","MA200"]:
             current_color = st.session_state.get(f"color_{ma}", MA_COLORS[ma])
@@ -6403,7 +6465,7 @@ def main():
     ms[2].metric("52W High",    f"${info.get('fiftyTwoWeekHigh',0):.2f}" if info.get("fiftyTwoWeekHigh") else "—")
     ms[3].metric("52W Low",     f"${info.get('fiftyTwoWeekLow',0):.2f}"  if info.get("fiftyTwoWeekLow")  else "—")
     ms[4].metric("Avg Volume",  fmtn(info.get("averageVolume")))
-    ms[5].metric("Div Yield",   with_avg(fpct(info.get("dividendYield")) if info.get("dividendYield") else "None", "div_yield", info))
+    ms[5].metric("Div Yield",   with_avg(fpct(info.get("dividendYield")) if info.get("dividendYield") is not None else "—", "div_yield", info))
     st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
 
     # ── PROFESSIONAL SECTION NAVIGATION ────────────────────────────
@@ -6466,7 +6528,7 @@ def main():
             if chart_err or chart_hist is None or chart_hist.empty:
                 chart_hist = hist
                 st.warning(f"Recent chart data was unavailable, so the chart fell back to {period_label}: {chart_err}")
-            elif chart_is_intraday and not show_ext_hours:
+            elif chart_is_intraday and not show_ext_hours and uses_us_regular_session_symbol(ticker):
                 chart_hist = regular_session_only(chart_hist)
         with st.spinner("Calculating chart indicators…"):
             chart_ta = calc_ta(chart_hist)
@@ -6580,7 +6642,7 @@ def main():
             tl=float(info.get("targetLowPrice",0) or 0)
             tm=float(info.get("targetMeanPrice",0) or 0)
             th=float(info.get("targetHighPrice",0) or 0)
-            na=int(info.get("numberOfAnalystOpinions",0) or 0)
+            na=int(info.get("recommendationAnalystCount") or info.get("numberOfAnalystOpinions",0) or 0)
             rk_raw=(info.get("recommendationKey") or "").strip()
             rm_raw=info.get("recommendationMean", None)
             source=(info.get("recommendationSource") or "").strip()
@@ -6669,23 +6731,26 @@ def main():
         yrs =dc4.slider("Projection Years",5,15,10,1)
         mos =dc5.slider("Margin of Safety %",0,40,20,5)
         if fcf_raw>0:
-            per_sh=dcf_value(fcf_raw,gr,tg,wacc,yrs)/shares
-            safe=per_sh*(1-mos/100)
-            ud=(per_sh/price-1)*100 if price else 0
-            vc=GREEN if ud>10 else AMBER if ud>-10 else RED
-            vt="Undervalued ✓" if ud>10 else "Fairly Valued ≈" if ud>-10 else "Overvalued ✗"
-            d1,d2,d3,d4=st.columns(4)
-            d1.metric("DCF Intrinsic Value",f"${per_sh:.2f}")
-            d2.metric("Buy Below (w/ MoS)", f"${safe:.2f}")
-            d3.metric("Current Price",       f"${price:.2f}")
-            d4.metric("DCF Upside",          f"{ud:+.1f}%")
-            st.markdown(f"""
-            <div style="padding:12px 20px;background:#13161e;border-left:3px solid {vc};
-                        border-radius:0 10px 10px 0;margin-top:6px">
-              <span style="color:{vc};font-weight:700">{vt}</span>
-              <span style="color:#475569;font-size:12px;margin-left:12px">
-                {gr:.0f}% growth · {wacc:.0f}% WACC · {mos:.0f}% margin of safety</span>
-            </div>""", unsafe_allow_html=True)
+            if wacc <= tg:
+                st.warning("DCF unavailable for this scenario: discount rate must be greater than terminal growth rate.")
+            else:
+                per_sh=dcf_value(fcf_raw,gr,tg,wacc,yrs)/shares
+                safe=per_sh*(1-mos/100)
+                ud=(per_sh/price-1)*100 if price else 0
+                vc=GREEN if ud>10 else AMBER if ud>-10 else RED
+                vt="Undervalued ✓" if ud>10 else "Fairly Valued ≈" if ud>-10 else "Overvalued ✗"
+                d1,d2,d3,d4=st.columns(4)
+                d1.metric("DCF Intrinsic Value",f"${per_sh:.2f}")
+                d2.metric("Buy Below (w/ MoS)", f"${safe:.2f}")
+                d3.metric("Current Price",       f"${price:.2f}")
+                d4.metric("DCF Upside",          f"{ud:+.1f}%")
+                st.markdown(f"""
+                <div style="padding:12px 20px;background:#13161e;border-left:3px solid {vc};
+                            border-radius:0 10px 10px 0;margin-top:6px">
+                  <span style="color:{vc};font-weight:700">{vt}</span>
+                  <span style="color:#475569;font-size:12px;margin-left:12px">
+                    {gr:.0f}% growth · {wacc:.0f}% WACC · {mos:.0f}% margin of safety</span>
+                </div>""", unsafe_allow_html=True)
         else:
             st.info("Free cash flow unavailable — DCF requires positive FCF.")
 
@@ -6761,7 +6826,7 @@ def main():
         r4.metric("Sortino",      with_avg(f"{risk_metric['sortino']:.2f}", "sortino", info))
         r5.metric("Max Drawdown", with_avg(f"{risk_metric['max_dd']:.1f}%", "max_dd", info))
         r6.metric("Calmar Ratio", with_avg(f"{risk_metric['calmar']:.2f}", "calmar", info))
-        r7.metric("1yr Return",   f"{risk_metric['ret1y']:.1f}%")
+        r7.metric("Period Return", f"{risk_metric['ret1y']:.1f}%")
         r8,r9,r10,r11,r12,r13,r14=st.columns(7)
         r8.metric("Alpha vs SPY", f"{risk_metric['alpha']:.2f}%")
         r9.metric("VaR 95%",      with_avg(f"{risk_metric['var95']:.2f}%", "var95", info))
