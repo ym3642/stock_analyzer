@@ -601,46 +601,23 @@ def _period_to_days(period, default=730):
     return n if unit == "d" else n * 30 if unit == "mo" else n * 365
 
 def _normalize_ohlcv(df):
-    """Normalize FMP daily, light, adjusted, and quote responses into OHLCV."""
     if df is None or df.empty:
         return pd.DataFrame()
     out = df.copy()
-    col_lookup = {str(c).strip().lower(): c for c in out.columns}
-
-    if "date" in col_lookup:
-        dc = col_lookup["date"]
-        out[dc] = pd.to_datetime(out[dc], errors="coerce")
-        out = out.dropna(subset=[dc]).set_index(dc)
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce")
+        out = out.dropna(subset=["date"]).set_index("date")
     elif not isinstance(out.index, pd.DatetimeIndex):
         return pd.DataFrame()
-
-    col_lookup = {str(c).strip().lower(): c for c in out.columns}
-    rename_map = {}
-    for source, target in {
-        "open": "Open", "high": "High", "low": "Low", "close": "Close",
-        "adjopen": "Open", "adjhigh": "High", "adjlow": "Low", "adjclose": "Adj Close",
-        "price": "Close", "volume": "Volume",
-    }.items():
-        if source in col_lookup:
-            rename_map[col_lookup[source]] = target
-    out = out.rename(columns=rename_map).sort_index()
-
+    out = out.sort_index()
+    out = out.rename(columns={"open":"Open", "high":"High", "low":"Low", "close":"Close", "adjClose":"Adj Close", "volume":"Volume"})
     for col in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
-
     if "Close" not in out.columns and "Adj Close" in out.columns:
         out["Close"] = out["Adj Close"]
-    if "Close" not in out.columns:
-        return pd.DataFrame()
-
-    for col in ["Open", "High", "Low"]:
-        if col not in out.columns:
-            out[col] = out["Close"]
-    if "Volume" not in out.columns:
-        out["Volume"] = 0
-
-    return out[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
+    keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in out.columns]
+    return out[keep].dropna(subset=["Close"])
 
 def _remember_fmp_error(message):
     """Store the latest FMP error without exposing the API key."""
@@ -826,8 +803,96 @@ def _fmp_build_info(ticker):
                 "targetMeanPrice": 0,
             })
 
+        # Stable FMP enrichment layer. Some FMP accounts return price history
+        # from /stable but return thin/empty payloads on legacy /api/v3 profile.
+        # This restores visible fields such as Market Cap, 52W range, volume,
+        # company name, sector, industry, beta, and price using current FMP APIs.
+        def _first_row(data):
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                return data[0]
+            if isinstance(data, dict):
+                return data
+            return {}
+
+        def _num(v, default=0):
+            try:
+                if v is None or v == "":
+                    return default
+                x = float(str(v).replace(",", ""))
+                return x if np.isfinite(x) else default
+            except Exception:
+                return default
+
+        def _pick(d, *keys, default=None):
+            for k in keys:
+                if isinstance(d, dict) and d.get(k) not in (None, "", "None", "nan"):
+                    return d.get(k)
+            return default
+
+        stable_profile = _first_row(_fmp_get_stable("profile", {"symbol": _fmp_symbol(ticker)}))
+        if stable_profile:
+            rng = str(_pick(stable_profile, "range", default="") or "")
+            low_52 = high_52 = 0
+            if "-" in rng:
+                parts = rng.replace(" ", "").split("-", 1)
+                low_52, high_52 = _num(parts[0], 0), _num(parts[1], 0)
+            price = _num(_pick(stable_profile, "price", "regularMarketPrice", default=info.get("regularMarketPrice", 0)), 0)
+            mcap = _num(_pick(stable_profile, "marketCap", "mktCap", "marketCapitalization", default=info.get("marketCap", 0)), 0)
+            if price and not _num(info.get("regularMarketPrice"), 0):
+                info["regularMarketPrice"] = price
+                info["currentPrice"] = price
+            if mcap and not _num(info.get("marketCap"), 0):
+                info["marketCap"] = mcap
+
+            info.update({
+                "shortName": info.get("shortName") or _pick(stable_profile, "companyName", "company", "name", default=ticker),
+                "longName": info.get("longName") or _pick(stable_profile, "companyName", "company", "name", default=ticker),
+                "symbol": info.get("symbol") or _pick(stable_profile, "symbol", default=_fmp_symbol(ticker)),
+                "sector": info.get("sector") or _pick(stable_profile, "sector", default=""),
+                "industry": info.get("industry") or _pick(stable_profile, "industry", default=""),
+                "country": info.get("country") or _pick(stable_profile, "country", default=""),
+                "website": info.get("website") or _pick(stable_profile, "website", default=""),
+                "longBusinessSummary": info.get("longBusinessSummary") or _pick(stable_profile, "description", default=""),
+                "fullTimeEmployees": info.get("fullTimeEmployees") or _num(_pick(stable_profile, "fullTimeEmployees", "employees"), 0),
+                "exchange": info.get("exchange") or _pick(stable_profile, "exchangeShortName", "exchange", default=""),
+                "currency": info.get("currency") or _pick(stable_profile, "currency", default="USD"),
+                "beta": info.get("beta") or _num(_pick(stable_profile, "beta"), 1.0),
+                "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh") or _num(_pick(stable_profile, "yearHigh", "fiftyTwoWeekHigh"), high_52),
+                "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow") or _num(_pick(stable_profile, "yearLow", "fiftyTwoWeekLow"), low_52),
+                "logo_url": info.get("logo_url") or _pick(stable_profile, "image", "logo", default=""),
+                "ceo": info.get("ceo") or _pick(stable_profile, "ceo", "CEO", default=""),
+            })
+
+        for quote_data in (
+            _fmp_get(f"quote/{_fmp_symbol(ticker)}"),
+            _fmp_get_stable("quote", {"symbol": _fmp_symbol(ticker)}),
+            _fmp_get_stable("quote-short", {"symbol": _fmp_symbol(ticker)}),
+        ):
+            q = _first_row(quote_data)
+            if not q:
+                continue
+            if not _num(info.get("regularMarketPrice"), 0):
+                info["regularMarketPrice"] = _num(_pick(q, "price", "close", "previousClose"), 0)
+                info["currentPrice"] = info["regularMarketPrice"]
+            if not _num(info.get("marketCap"), 0):
+                info["marketCap"] = _num(_pick(q, "marketCap", "mktCap", "marketCapitalization"), 0)
+            info["volume"] = info.get("volume") or _num(_pick(q, "volume"), 0)
+            info["averageVolume"] = info.get("averageVolume") or _num(_pick(q, "avgVolume", "averageVolume"), 0)
+            info["previousClose"] = info.get("previousClose") or _num(_pick(q, "previousClose"), 0)
+            info["open"] = info.get("open") or _num(_pick(q, "open"), 0)
+            info["dayHigh"] = info.get("dayHigh") or _num(_pick(q, "dayHigh", "high"), 0)
+            info["dayLow"] = info.get("dayLow") or _num(_pick(q, "dayLow", "low"), 0)
+            info["trailingPE"] = info.get("trailingPE") or _num(_pick(q, "pe", "peRatio"), 0)
+            info["trailingEps"] = info.get("trailingEps") or _num(_pick(q, "eps", "epsTTM"), 0)
+            info["fiftyTwoWeekHigh"] = info.get("fiftyTwoWeekHigh") or _num(_pick(q, "yearHigh", "fiftyTwoWeekHigh"), 0)
+            info["fiftyTwoWeekLow"] = info.get("fiftyTwoWeekLow") or _num(_pick(q, "yearLow", "fiftyTwoWeekLow"), 0)
+
+        if not _num(info.get("marketCap"), 0):
+            mc = _first_row(_fmp_get_stable("market-capitalization", {"symbol": _fmp_symbol(ticker)}))
+            info["marketCap"] = _num(_pick(mc, "marketCap", "marketCapTTM", "value", "marketCapitalization"), 0)
+
     except Exception as e:
-        pass
+        _remember_fmp_error(f"FMP info loader failed for {ticker}: {e}")
 
     return info if info else None
 
@@ -835,8 +900,10 @@ def _fmp_build_info(ticker):
 def _fmp_build_hist(ticker, period="2y"):
     """Fetch OHLCV daily history from FMP only.
 
-    Uses current stable endpoints first, then legacy v3. Stable light returns
-    date/price/volume, so _normalize_ohlcv maps price -> Close.
+    Uses FMP's usual v3 endpoint first:
+        /api/v3/historical-price-full/AAPL?timeseries=730&apikey=...
+
+    Then tries date-filtered v3 and stable endpoints.
     """
     try:
         from datetime import datetime, timedelta
@@ -846,59 +913,42 @@ def _fmp_build_hist(ticker, period="2y"):
         date_to = datetime.today().strftime("%Y-%m-%d")
 
         candidates = [
-            ("stable", "historical-price-eod/full", {"symbol": sym}),
-            ("stable", "historical-price-eod/light", {"symbol": sym}),
-            ("stable", "historical-price-eod/dividend-adjusted", {"symbol": sym}),
-            ("stable", "historical-price-eod/full", {"symbol": sym, "from": date_from, "to": date_to}),
-            ("stable", "historical-price-eod/light", {"symbol": sym, "from": date_from, "to": date_to}),
             ("v3", f"historical-price-full/{sym}", {"timeseries": int(days)}),
             ("v3", f"historical-price-full/{sym}", {"from": date_from, "to": date_to}),
+            ("stable", "historical-price-eod/full", {"symbol": sym, "from": date_from, "to": date_to}),
+            ("stable", "historical-price-eod/light", {"symbol": sym, "from": date_from, "to": date_to}),
         ]
 
         for base, endpoint, params in candidates:
             data = _fmp_get(endpoint, params=params, base=base)
             if not data:
                 continue
+            historical = []
             if isinstance(data, dict):
                 historical = data.get("historical") or data.get("data") or data.get("results") or []
-                if not historical and any(k in data for k in ("date", "close", "adjClose", "price")):
+                if not historical and any(k in data for k in ("date", "close", "adjClose")):
                     historical = [data]
             elif isinstance(data, list):
                 historical = data
-            else:
-                historical = []
             if historical:
                 df = _normalize_ohlcv(pd.DataFrame(historical))
                 if not df.empty:
-                    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=int(days) + 7)
-                    df = df[df.index >= cutoff]
                     return df
 
-        quote_candidates = [
-            ("v3", f"quote/{sym}", {}),
-            ("stable", "quote", {"symbol": sym}),
-            ("stable", "quote-short", {"symbol": sym}),
-        ]
-        for q_base, q_endpoint, q_params in quote_candidates:
-            quote = _fmp_get(q_endpoint, params=q_params, base=q_base)
-            rows = quote if isinstance(quote, list) else [quote] if isinstance(quote, dict) else []
-            if not rows:
-                continue
-            q = rows[0]
-            price = q.get("price") or q.get("previousClose") or q.get("close") or q.get("adjClose")
+        quote = _fmp_get(f"quote/{sym}", base="v3")
+        if isinstance(quote, list) and quote:
+            q = quote[0]
+            price = q.get("price") or q.get("previousClose")
             if price is not None:
                 today = pd.Timestamp.today().normalize()
-                one = pd.DataFrame({
+                return pd.DataFrame({
                     "Open": [q.get("open", price)],
-                    "High": [q.get("dayHigh", q.get("high", price))],
-                    "Low": [q.get("dayLow", q.get("low", price))],
+                    "High": [q.get("dayHigh", price)],
+                    "Low": [q.get("dayLow", price)],
                     "Close": [price],
                     "Volume": [q.get("volume", 0)],
                 }, index=[today]).apply(pd.to_numeric, errors="coerce")
-                if not one.empty and one["Close"].notna().any():
-                    return one
 
-        _remember_fmp_error(f"No usable rows from FMP historical or quote endpoints for {sym}.")
         return pd.DataFrame()
     except Exception as e:
         _remember_fmp_error(f"FMP historical loader failed for {ticker}: {e}")
