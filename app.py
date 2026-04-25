@@ -26,6 +26,8 @@ except Exception:
     Retry = None
 import hashlib
 import json, re, copy, math
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── FMP-only compatibility helpers ────────────────────────────────
 # All market/fundamental/news data is routed through Financial Modeling Prep.
@@ -382,12 +384,66 @@ def _secret_or_env_bool(name, default=False):
     return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 SMARTSTOCK_FAST_MODE = not _secret_or_env_bool("SMARTSTOCK_DEEP_FMP", default=False)
-FMP_TIMEOUT_SECONDS = float(_os.environ.get("SMARTSTOCK_FMP_TIMEOUT", "10"))
+FMP_TIMEOUT_SECONDS = float(_os.environ.get("SMARTSTOCK_FMP_TIMEOUT", "6"))
 FMP_RAW_CACHE_TTL = int(_os.environ.get("SMARTSTOCK_FMP_RAW_CACHE_TTL", "3600"))
 # Realized risk metrics should not silently depend on a stale hard-coded
 # treasury rate. Set SMARTSTOCK_RISK_FREE_RATE=0.045 for 4.5%, etc.
 RISK_FREE_ANNUAL_RATE = float(_os.environ.get("SMARTSTOCK_RISK_FREE_RATE", "0.00"))
 _FMP_V4_BASE = "https://financialmodelingprep.com/api/v4"
+
+# ── Thread-safe warmup cache ───────────────────────────────────────
+# _fmp_warmup_parallel() fires a batch of FMP requests concurrently and stores
+# raw results here. _fmp_get() checks this dict first so the subsequent
+# sequential merge_records / rows_all calls are instant cache hits.
+_WARMUP: dict = {}
+_WARMUP_LOCK = threading.Lock()
+
+def _fmp_warmup_parallel(endpoint_list):
+    """
+    Fire every (endpoint, params, base) request in parallel.
+    Results land in _WARMUP so that the _fmp_get() calls that follow
+    immediately find their data without making a second HTTP round-trip.
+    Uses a plain thread pool — no Streamlit context required.
+    """
+    key = _get_fmp_key()
+    if not key:
+        return
+
+    base_url_map = {
+        "stable": _FMP_STABLE_BASE,
+        "v4":     _FMP_V4_BASE,
+        "v3":     _FMP_V3_BASE,
+    }
+
+    def _one(ep, params_items, base_str):
+        wkey = (ep, params_items, base_str)
+        with _WARMUP_LOCK:
+            if wkey in _WARMUP:
+                return
+        base_url = base_url_map.get(base_str, _FMP_V3_BASE)
+        p = {k: v for k, v in params_items}
+        p["apikey"] = key
+        try:
+            r = _http_session().get(
+                f"{base_url}/{ep.lstrip('/')}",
+                params=p,
+                timeout=FMP_TIMEOUT_SECONDS,
+            )
+            data = r.json() if r.status_code == 200 else {}
+        except Exception:
+            data = {}
+        with _WARMUP_LOCK:
+            _WARMUP[wkey] = data
+
+    jobs = []
+    for ep, params, base in endpoint_list:
+        ep_clean = str(ep).lstrip("/")
+        pi = _params_items(params or {})
+        bs = str(base or "v3").lower()
+        jobs.append((ep_clean, pi, bs))
+
+    with ThreadPoolExecutor(max_workers=min(len(jobs), 10)) as ex:
+        list(ex.map(lambda j: _one(*j), jobs))
 
 @st.cache_resource(show_spinner=False)
 def _http_session():
@@ -530,6 +586,8 @@ def _fmp_get(endpoint, params=None, base="v3"):
 
     Uses a cached, pooled HTTP layer to avoid repeating identical requests on
     every Streamlit rerun. Supports base="v3", base="v4", and base="stable".
+    Checks the parallel warmup cache (_WARMUP) first so that pre-warmed
+    endpoints are served instantly without a second HTTP round-trip.
     """
     try:
         key = _get_fmp_key()
@@ -537,10 +595,33 @@ def _fmp_get(endpoint, params=None, base="v3"):
             _remember_fmp_error("FMP_API_KEY is missing in Streamlit Secrets/environment.")
             return None
 
+        # ── Fast path: warmup cache ────────────────────────────────
+        ep_clean  = str(endpoint).lstrip("/")
+        pi        = _params_items(params)
+        base_str  = str(base or "v3").lower()
+        wkey      = (ep_clean, pi, base_str)
+        with _WARMUP_LOCK:
+            if wkey in _WARMUP:
+                data = copy.deepcopy(_WARMUP.pop(wkey))
+                # Reuse the validation logic below without re-fetching
+                if isinstance(data, dict):
+                    lowered = {str(k).lower(): v for k, v in data.items()}
+                    if "error" in lowered or "error message" in lowered:
+                        _remember_fmp_error(str(data)[:800])
+                        return None
+                    if "message" in lowered and not any(k in lowered for k in ("historical", "symbol", "date", "price", "results", "data")):
+                        _remember_fmp_error(str(data)[:800])
+                        return None
+                    return copy.deepcopy(data) if data else None
+                if isinstance(data, list):
+                    return copy.deepcopy(data) if len(data) else None
+                return None
+
+        # ── Normal path: Streamlit cached HTTP layer ───────────────
         data = _fmp_get_cached(
-            str(endpoint).lstrip("/"),
-            _params_items(params),
-            str(base or "v3").lower(),
+            ep_clean,
+            pi,
+            base_str,
             _key_fingerprint(key),
         )
         if isinstance(data, dict) and "__smartstock_error__" in data:
@@ -930,6 +1011,41 @@ def _fmp_build_info(ticker):
     """
     sym = _fmp_symbol(ticker)
     info = {"symbol": sym, "quoteType": "EQUITY"}
+
+    # ── Parallel pre-warm: fire all needed FMP endpoints concurrently ──
+    # By the time merge_records / rows_all run sequentially below, every
+    # response is already sitting in _WARMUP and is served instantly.
+    _fmp_warmup_parallel([
+        ("profile",                          {"symbol": sym},                    "stable"),
+        (f"profile/{sym}",                   {},                                 "v3"),
+        ("quote",                            {"symbol": sym},                    "stable"),
+        ("quote-short",                      {"symbol": sym},                    "stable"),
+        (f"quote/{sym}",                     {},                                 "v3"),
+        ("key-metrics-ttm",                  {"symbol": sym},                    "stable"),
+        (f"key-metrics-ttm/{sym}",           {},                                 "v3"),
+        ("ratios-ttm",                       {"symbol": sym},                    "stable"),
+        (f"ratios-ttm/{sym}",                {},                                 "v3"),
+        ("financial-growth",                 {"symbol": sym, "limit": 4},        "stable"),
+        (f"financial-growth/{sym}",          {"limit": 4},                       "v3"),
+        ("income-statement-ttm",             {"symbol": sym},                    "stable"),
+        (f"income-statement-ttm/{sym}",      {},                                 "v3"),
+        ("balance-sheet-statement-ttm",      {"symbol": sym},                    "stable"),
+        (f"balance-sheet-statement-ttm/{sym}", {},                               "v3"),
+        ("cash-flow-statement-ttm",          {"symbol": sym},                    "stable"),
+        (f"cash-flow-statement-ttm/{sym}",   {},                                 "v3"),
+        ("income-statement",                 {"symbol": sym, "limit": 6, "period": "annual"},   "stable"),
+        ("income-statement",                 {"symbol": sym, "limit": 8, "period": "quarter"},  "stable"),
+        ("balance-sheet-statement",          {"symbol": sym, "limit": 6, "period": "annual"},   "stable"),
+        ("cash-flow-statement",              {"symbol": sym, "limit": 6, "period": "annual"},   "stable"),
+        ("enterprise-values",                {"symbol": sym, "limit": 4},        "stable"),
+        (f"enterprise-values/{sym}",         {"limit": 4},                       "v3"),
+        ("price-target-consensus",           {"symbol": sym},                    "stable"),
+        ("grades-consensus",                 {"symbol": sym},                    "stable"),
+        ("analyst-estimates",                {"symbol": sym, "period": "annual",  "page": 0, "limit": 10}, "stable"),
+        ("analyst-estimates",                {"symbol": sym, "period": "quarter", "page": 0, "limit": 10}, "stable"),
+        ("shares-float",                     {"symbol": sym},                    "stable"),
+        ("short-interest",                   {"symbol": sym, "limit": 4},        "stable"),
+    ])
 
     def N(*vals, default=None):
         return _num(*vals, default=default)
@@ -1423,6 +1539,23 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
     info = dict(info or {})
     sym = _fmp_symbol(ticker)
 
+    # ── Fast-path: skip re-fetching when _fmp_build_info already filled
+    # all critical fields.  The repair is only for genuine gaps.
+    _REPAIR_CRITICAL = {
+        "currentPrice", "marketCap", "totalRevenue",
+        "grossMargins", "profitMargins", "returnOnEquity",
+    }
+    if all(info.get(f) not in (None, "", 0, 0.0) for f in _REPAIR_CRITICAL):
+        # Still do the lightweight averageVolume fallback from hist
+        if info.get("averageVolume") in (None, "", 0, 0.0) and hist is not None and not getattr(hist, "empty", True) and "Volume" in hist.columns:
+            try:
+                av = pd.to_numeric(hist["Volume"], errors="coerce").dropna().tail(60).mean()
+                if np.isfinite(av) and av > 0:
+                    info["averageVolume"] = float(av)
+            except Exception:
+                pass
+        return info
+
     def n(*vals, default=None):
         return _num(*vals, default=default)
 
@@ -1766,7 +1899,24 @@ def fetch_chart_history(ticker, period="1y", interval="1d", prepost=False):
     except Exception as e:
         return None, str(e)
     return None, "No FMP chart history returned. Check your FMP plan, ticker, or interval."
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_peers(tickers: tuple, period="1y"):
+    def _one(t):
+        try:
+            s = _fmp_ticker(t)
+            h = s.history(period=period, auto_adjust=True)
+            if h is not None and not h.empty:
+                return t, {"info": s.info, "hist": h}
+        except Exception:
+            pass
+        return t, None
 
+    out = {}
+    with ThreadPoolExecutor(max_workers=min(len(tickers), 6)) as ex:
+        for t, result in ex.map(_one, tickers):
+            if result is not None:
+                out[t] = result
+    return out
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_peers(tickers: tuple, period="1y"):
@@ -2025,6 +2175,7 @@ def technical_signal_model(df, fallback_price=None):
 #  TECHNICALS
 # ══════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def calc_ta(df):
     """Calculate indicators safely, even on short daily/intraday windows."""
     df = df.copy()
@@ -3861,23 +4012,29 @@ def _max_drawdown_pct(close):
 def fetch_market_regime_for_investor(refresh_token=0):
     symbols = ["SPY", "QQQ", "IWM", "TLT", "GLD", "USO", "^VIX"]
     rows = {}
-    for sym in symbols:
+
+    def _fetch_sym(sym):
         try:
             h = _fmp_ticker(sym).history(period="1y", auto_adjust=True)
             if h is None or h.empty or "Close" not in h:
-                continue
+                return sym, None
             close = h["Close"].dropna()
-            ma50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else float(close.iloc[-1])
+            ma50  = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else float(close.iloc[-1])
             ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else ma50
-            rows[sym] = {
-                "last": float(close.iloc[-1]),
-                "ret_1m": _safe_pct_return(close, 21),
-                "ret_3m": _safe_pct_return(close, 63),
-                "above_50": float(close.iloc[-1] > ma50),
+            return sym, {
+                "last":      float(close.iloc[-1]),
+                "ret_1m":    _safe_pct_return(close, 21),
+                "ret_3m":    _safe_pct_return(close, 63),
+                "above_50":  float(close.iloc[-1] > ma50),
                 "above_200": float(close.iloc[-1] > ma200),
             }
         except Exception:
-            pass
+            return sym, None
+
+    with ThreadPoolExecutor(max_workers=len(symbols)) as ex:
+        for sym, result in ex.map(_fetch_sym, symbols):
+            if result is not None:
+                rows[sym] = result
     spy = rows.get("SPY", {}); qqq = rows.get("QQQ", {}); iwm = rows.get("IWM", {})
     vix = rows.get("^VIX", {}).get("last", 20)
     risk_on = 50
@@ -3899,58 +4056,63 @@ def fetch_market_regime_for_investor(refresh_token=0):
     return {"risk_on": risk_on, "label": label, "assets": rows, "vix": round(float(vix), 1)}
 
 
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_investor_universe_data(tickers_tuple, refresh_token=0):
-    out = []
-    for t in tickers_tuple:
-        if str(t).upper() in {"CASH", "CASH / T-BILLS"}:
-            continue
+    _CASH = {"CASH", "CASH / T-BILLS"}
+    ETF_SET = {"SPY","QQQ","GLD","TLT","IEF","SHY","TIP","USO","DBC","EEM","FXI","XLE","XLF","XLV","XLP","ARKK","UUP"}
+
+    def _fetch_one(t):
+        if str(t).upper() in _CASH:
+            return None
         try:
-            tk = _fmp_ticker(t)
+            tk   = _fmp_ticker(t)
             info = tk.info or {}
             hist = tk.history(period="1y", auto_adjust=True)
             if hist is None or hist.empty or "Close" not in hist:
-                continue
+                return None
             hist_ta = calc_ta(hist)
-            close = hist["Close"].dropna()
-            last = hist_ta.iloc[-1] if len(hist_ta) else pd.Series(dtype=float)
-            ret = close.pct_change().dropna()
-            vol = float(ret.std() * np.sqrt(252) * 100) if len(ret) > 2 else 0.0
-            row = {
-                "Ticker": str(t).upper(),
-                "Company / Asset": info.get("shortName") or info.get("longName") or str(t).upper(),
-                "Sector": info.get("sector") or ("ETF / Macro" if info.get("quoteType") == "ETF" or str(t).upper() in {"SPY","QQQ","GLD","TLT","IEF","SHY","TIP","USO","DBC","EEM","FXI","XLE","XLF","XLV","XLP","ARKK","UUP"} else "Unknown"),
-                "Industry": info.get("industry") or "—",
-                "Country": info.get("country") or "Global/ETF",
-                "Market Cap": safe_float(info.get("marketCap"), 0),
-                "Price": float(close.iloc[-1]),
-                "P/E": safe_float(info.get("trailingPE"), 0),
-                "Forward P/E": safe_float(info.get("forwardPE"), 0),
-                "P/S": safe_float(info.get("priceToSalesTrailing12Months"), 0),
-                "PEG": safe_float(info.get("pegRatio"), 0),
-                "Revenue Growth": safe_float(info.get("revenueGrowth"), 0) * 100,
-                "Earnings Growth": safe_float(info.get("earningsGrowth"), 0) * 100,
-                "Net Margin": safe_float(info.get("profitMargins"), 0) * 100,
-                "ROE": safe_float(info.get("returnOnEquity"), 0) * 100,
-                "Debt/Equity": safe_float(info.get("debtToEquity"), 0) / 100,
-                "Dividend Yield": safe_float(info.get("dividendYield"), 0) * 100,
-                "Beta": safe_float(info.get("beta"), 1),
-                "1M Return": _safe_pct_return(close, 21),
-                "3M Return": _safe_pct_return(close, 63),
-                "6M Return": _safe_pct_return(close, 126),
-                "1Y Return": _safe_pct_return(close, 252),
-                "Volatility": vol,
-                "Max Drawdown": _max_drawdown_pct(close),
-                "RSI": safe_float(last.get("RSI"), 50),
-                "Above MA50": bool(safe_float(last.get("MA50"), 0) and float(close.iloc[-1]) > safe_float(last.get("MA50"), 0)),
-                "Above MA200": bool(safe_float(last.get("MA200"), 0) and float(close.iloc[-1]) > safe_float(last.get("MA200"), 0)),
+            close   = hist["Close"].dropna()
+            last_ta = hist_ta.iloc[-1] if len(hist_ta) else pd.Series(dtype=float)
+            ret     = close.pct_change().dropna()
+            vol     = float(ret.std() * np.sqrt(252) * 100) if len(ret) > 2 else 0.0
+            tu = str(t).upper()
+            return {
+                "Ticker":           tu,
+                "Company / Asset":  info.get("shortName") or info.get("longName") or tu,
+                "Sector":           info.get("sector") or ("ETF / Macro" if info.get("quoteType") == "ETF" or tu in ETF_SET else "Unknown"),
+                "Industry":         info.get("industry") or "—",
+                "Country":          info.get("country") or "Global/ETF",
+                "Market Cap":       safe_float(info.get("marketCap"), 0),
+                "Price":            float(close.iloc[-1]),
+                "P/E":              safe_float(info.get("trailingPE"), 0),
+                "Forward P/E":      safe_float(info.get("forwardPE"), 0),
+                "P/S":              safe_float(info.get("priceToSalesTrailing12Months"), 0),
+                "PEG":              safe_float(info.get("pegRatio"), 0),
+                "Revenue Growth":   safe_float(info.get("revenueGrowth"), 0) * 100,
+                "Earnings Growth":  safe_float(info.get("earningsGrowth"), 0) * 100,
+                "Net Margin":       safe_float(info.get("profitMargins"), 0) * 100,
+                "ROE":              safe_float(info.get("returnOnEquity"), 0) * 100,
+                "Debt/Equity":      safe_float(info.get("debtToEquity"), 0) / 100,
+                "Dividend Yield":   safe_float(info.get("dividendYield"), 0) * 100,
+                "Beta":             safe_float(info.get("beta"), 1),
+                "1M Return":        _safe_pct_return(close, 21),
+                "3M Return":        _safe_pct_return(close, 63),
+                "6M Return":        _safe_pct_return(close, 126),
+                "1Y Return":        _safe_pct_return(close, 252),
+                "Volatility":       vol,
+                "Max Drawdown":     _max_drawdown_pct(close),
+                "RSI":              safe_float(last_ta.get("RSI"), 50),
+                "Above MA50":       bool(safe_float(last_ta.get("MA50"), 0) and float(close.iloc[-1]) > safe_float(last_ta.get("MA50"), 0)),
+                "Above MA200":      bool(safe_float(last_ta.get("MA200"), 0) and float(close.iloc[-1]) > safe_float(last_ta.get("MA200"), 0)),
             }
-            out.append(row)
         except Exception:
-            continue
-    return pd.DataFrame(out)
+            return None
 
-
+    equity_tickers = [t for t in tickers_tuple if str(t).upper() not in _CASH]
+    with ThreadPoolExecutor(max_workers=min(len(equity_tickers), 8)) as ex:
+        results = list(ex.map(_fetch_one, equity_tickers))
+    return pd.DataFrame([r for r in results if r is not None])
 
 # ══════════════════════════════════════════════════════════════════
 #  INVESTOR VIEW — ENHANCED SCORING & BACKTEST ENGINE v2
@@ -5948,50 +6110,68 @@ def _ranking_note(pct, vol20, vol_ratio):
     if vol20 > 55: return "High volatility; suitable for active trading but position size should be smaller."
     if abs(pct) < 0.5 and vol20 < 25: return "Stable move; better for trend confirmation than short-term momentum."
     return "Moderate move; compare with sector and volume confirmation."
-@st.cache_data(ttl=3600, show_spinner=False)
-def ranking_snapshot(tickers_tuple, period="3mo"):
-    rows=[]
-    for t in tickers_tuple:
+@st.cache_data(ttl=900, show_spinner=False)
+def ai_score_universe(tickers_tuple, period="1y", model="risk_loving"):
+    """Score a universe with the built-in AI thesis model, grouped by reported industry."""
+    try:
+        spy_hist = _fmp_ticker("SPY").history(period=period, auto_adjust=True)
+    except Exception:
+        spy_hist = pd.DataFrame()
+
+    def _one(t):
         try:
-            y=_fmp_ticker(t); h=y.history(period=period, auto_adjust=True)
-            if h is None or h.empty or len(h)<2: continue
-            close=h["Close"].dropna(); last=float(close.iloc[-1]); prev=float(close.iloc[-2])
-            chg=last-prev; pct=chg/prev*100 if prev else 0.0
-            ret=close.pct_change().dropna(); vol20=float(ret.tail(20).std()*np.sqrt(252)*100) if len(ret)>=2 else 0.0
-            v=h["Volume"].dropna() if "Volume" in h else pd.Series(dtype=float)
-            vol_ratio=float(v.iloc[-1]/v.tail(20).mean()) if len(v)>=5 and v.tail(20).mean() else 0.0
-            try: inf=y.get_info()
-            except Exception: inf={}
-            market_cap = float(inf.get("marketCap") or 0)
-            dollar_vol = float(last * v.iloc[-1]) if len(v) else 0.0
-            momentum_5d = float((close.iloc[-1] / close.iloc[-6] - 1) * 100) if len(close) >= 6 and close.iloc[-6] else pct
-            gap_pct = float((h["Open"].iloc[-1] / close.iloc[-2] - 1) * 100) if "Open" in h and len(close) >= 2 and close.iloc[-2] else 0.0
-            liquidity_score = min(100.0, max(0.0, np.log10(max(dollar_vol, 1)) * 10 - 35))
-            trader_score = (abs(pct) * 1.8) + (vol20 * 0.20) + (vol_ratio * 7.0) + (abs(momentum_5d) * 0.8) + (liquidity_score * 0.15)
-            rows.append({
+            y = _fmp_ticker(t)
+            h = y.history(period=period, auto_adjust=True)
+            if h is None or h.empty or len(h) < 35:
+                return None
+            try:
+                inf = y.get_info()
+            except Exception:
+                inf = {}
+            hta   = calc_ta(h)
+            risk  = calc_risk(h, spy_hist)
+            scores = score_from_metrics(inf, risk, hta, model=model)
+            close  = h["Close"].dropna()
+            last_price = safe_float(close.iloc[-1], 0) if len(close) else 0
+            ret_3m = 0.0
+            if len(close) > 63 and close.iloc[-64]:
+                ret_3m = (close.iloc[-1] / close.iloc[-64] - 1) * 100
+            return {
                 "Ticker": t,
-                "Company": str(inf.get("shortName") or inf.get("longName") or t)[:42],
-                "Country": inf.get("country") or "Unknown",
+                "Company": str(inf.get("shortName") or inf.get("longName") or t)[:46],
                 "Sector": inf.get("sector") or "Unknown",
                 "Industry": inf.get("industry") or "Unknown",
-                "Market Cap": round(market_cap, 0),
-                "Market Cap $B": round(market_cap / 1e9, 2) if market_cap else 0,
-                "Last Price": round(last, 2),
-                "Change $": round(chg, 2),
-                "Change %": round(pct, 2),
-                "5D Momentum %": round(momentum_5d, 2),
-                "Opening Gap %": round(gap_pct, 2),
-                "20D Vol %": round(vol20, 2),
-                "Volume Ratio": round(vol_ratio, 2),
-                "Dollar Volume $M": round(dollar_vol / 1e6, 2),
-                "Liquidity Score": round(liquidity_score, 1),
-                "Trader Composite Score": round(trader_score, 1),
-                "Investment Note": _ranking_note(pct, vol20, vol_ratio),
-            })
-        except Exception: continue
-    return pd.DataFrame(rows)
+                "Country": inf.get("country") or "Unknown",
+                "Market Cap $B": round(safe_float(inf.get("marketCap"), 0) / 1e9, 2),
+                "Last Price": round(last_price, 2),
+                "AI Score": scores.get("overall_score", 0),
+                "Recommendation": scores.get("recommendation_model", "Hold"),
+                "Model": scores.get("model_name", AI_RISK_MODEL_NAMES.get(model, model)),
+                "Growth": scores.get("growth_score", 0),
+                "Momentum": scores.get("momentum_score", 0),
+                "Quality": scores.get("quality_score", 0),
+                "Valuation": scores.get("valuation_score", 0),
+                "Risk Score": scores.get("risk_score", 0),
+                "3M Return %": round(ret_3m, 2),
+                "Sharpe": risk.get("sharpe", 0),
+                "Max Drawdown %": risk.get("max_dd", 0),
+                "Annual Vol %": risk.get("vol", 0),
+                "Why It Scores This Way": (
+                    f"Growth {scores.get('growth_score', 0)}/100 and momentum {scores.get('momentum_score', 0)}/100 "
+                    f"are scored under the {AI_RISK_MODEL_NAMES.get(model, model)} model; quality {scores.get('quality_score', 0)}/100, "
+                    f"valuation {scores.get('valuation_score', 0)}/100, and risk {scores.get('risk_score', 0)}/100 adjust the final score."
+                ),
+            }
+        except Exception:
+            return None
 
-@st.cache_data(ttl=900, show_spinner=False)
+    with ThreadPoolExecutor(max_workers=min(len(tickers_tuple), 8)) as ex:
+        results = list(ex.map(_one, tickers_tuple))
+    df = pd.DataFrame([r for r in results if r is not None])
+    if not df.empty:
+        df = df.sort_values(["Industry", "AI Score"], ascending=[True, False]).reset_index(drop=True)
+    return df
+
 def ai_score_universe(tickers_tuple, period="1y", model="risk_loving"):
     """Score a universe with the same built-in AI thesis model, grouped by reported industry."""
     rows = []
@@ -6322,39 +6502,6 @@ def main():
 
         st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
         st.markdown('<div style="font-size:10px;color:#475569;text-transform:uppercase;'
-                    'letter-spacing:0.1em;margin-bottom:8px">Auto Refresh</div>',
-                    unsafe_allow_html=True)
-        auto_refresh = st.checkbox("Enable auto-refresh", value=False,
-                                   help="Automatically reload data while the app is open. Faster intervals may hit FMP API limits.")
-        refresh_map = {"15 seconds": 15, "30 seconds": 30, "1 minute": 60, "5 minutes": 300}
-        refresh_label = st.selectbox("Refresh speed", list(refresh_map.keys()), index=1,
-                                     label_visibility="collapsed", disabled=not auto_refresh)
-        refresh_seconds = refresh_map[refresh_label]
-        st.session_state["auto_refresh_enabled"] = auto_refresh
-        st.session_state["auto_refresh_seconds"] = refresh_seconds
-
-        if auto_refresh:
-            try:
-                from streamlit_autorefresh import st_autorefresh
-                refresh_count = st_autorefresh(interval=refresh_seconds * 1000, key="data_auto_refresh")
-                # Do not clear the entire cache on every scheduled rerun.
-                # Clearing all cached data caused repeated FMP/RSS refetches and
-                # quickly triggered slow loads or API limits. Cached data will
-                # update by TTL or by explicit Update buttons.
-                if refresh_count != st.session_state.get("_last_auto_refresh_count", -1):
-                    st.session_state["_last_auto_refresh_count"] = refresh_count
-                    st.session_state["_soft_refresh_count"] = refresh_count
-                st.caption(f"Auto-refreshing every {refresh_seconds}s · cached API calls are reused · refresh #{refresh_count}")
-            except Exception:
-                import streamlit.components.v1 as components
-                components.html(
-                    f"""<script>setTimeout(function(){{window.parent.location.reload();}}, {refresh_seconds * 1000});</script>""",
-                    height=0,
-                )
-                st.caption(f"Auto-refreshing every {refresh_seconds}s")
-
-        st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
-        st.markdown('<div style="font-size:10px;color:#475569;text-transform:uppercase;'
                     'letter-spacing:0.1em;margin-bottom:10px">Price Chart Overlays</div>',
                     unsafe_allow_html=True)
         show_bb      = st.checkbox("Bollinger Bands (20, ±2σ)", value=False)
@@ -6394,7 +6541,32 @@ def main():
         render_ai_model_selector("", key="ai_model_sidebar")
         st.caption(ai_model_description())
         st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
-        st.button("⟳  Analyze", type="primary", use_container_width=True)
+
+        # ── Manual refresh ─────────────────────────────────────────
+        st.markdown(
+            '<div style="font-size:10px;color:#475569;text-transform:uppercase;'
+            'letter-spacing:0.1em;margin-bottom:8px">Data</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button("⟳  Refresh Data", type="primary", use_container_width=True,
+                     help="Clear all cached prices, indicators, and fundamentals for the current ticker and re-fetch from FMP."):
+            fetch_stock.clear()
+            fetch_chart_history.clear()
+            _fmp_build_info.clear()
+            calc_ta.clear()
+            calc_risk.clear()
+            fetch_financial_reports.clear()
+            fetch_news_items.clear()
+            fetch_market_news.clear()
+            fetch_spy.clear()
+            st.session_state["_last_manual_refresh"] = datetime.now().strftime("%H:%M:%S")
+            st.rerun()
+
+        _last = st.session_state.get("_last_manual_refresh")
+        if _last:
+            st.caption(f"Last refreshed at {_last}")
+        else:
+            st.caption("Data is cached — press Refresh to load the latest prices.")
         if st.session_state.get("section_nav", "overview") != "overview":
             if st.button("← Back to Overview", key="sidebar_back_overview", use_container_width=True):
                 st.session_state["section_nav"] = "overview"
