@@ -1287,6 +1287,121 @@ def _fmp_build_info(ticker):
         info.setdefault("longName", info.get("shortName", sym))
         return info
 
+
+def _fmp_repair_ui_fields(info, ticker, hist=None):
+    """Repair final Yahoo-style fields that the old UI expects."""
+    info = dict(info or {})
+    sym = _fmp_symbol(ticker)
+
+    def n(*vals, default=None):
+        return _num(*vals, default=default)
+
+    def pct(*vals):
+        for v in vals:
+            x = _pct_to_decimal(v)
+            if x is not None:
+                return x
+        return None
+
+    def one(endpoint, params=None, base="v3"):
+        try:
+            rs = _records(_fmp_get(endpoint, params or {}, base=base))
+            return rs[0] if rs else {}
+        except Exception:
+            return {}
+
+    def set_missing(k, *vals, pctval=False):
+        if info.get(k) not in (None, "", 0, 0.0):
+            return
+        v = pct(*vals) if pctval else n(*vals, default=None)
+        if v not in (None, ""):
+            info[k] = v
+
+    q = one(f"quote/{sym}", {}, "v3") or one("quote", {"symbol": sym}, "stable")
+    prof = one(f"profile/{sym}", {}, "v3") or one("profile", {"symbol": sym}, "stable")
+    km = one(f"key-metrics-ttm/{sym}", {}, "v3") or one("key-metrics-ttm", {"symbol": sym}, "stable")
+    rt = one(f"ratios-ttm/{sym}", {}, "v3") or one("ratios-ttm", {"symbol": sym}, "stable") or one("metrics-ratios-ttm", {"symbol": sym}, "stable")
+    inc = one(f"income-statement-ttm/{sym}", {}, "v3") or one("income-statement-ttm", {"symbol": sym}, "stable") or one(f"income-statement/{sym}", {"limit": 1}, "v3")
+    bal = one(f"balance-sheet-statement/{sym}", {"limit": 1, "period": "quarter"}, "v3") or one(f"balance-sheet-statement/{sym}", {"limit": 1}, "v3") or one("balance-sheet-statement", {"symbol": sym, "limit": 1, "period": "quarter"}, "stable")
+    cf = one(f"cash-flow-statement-ttm/{sym}", {}, "v3") or one("cash-flow-statement-ttm", {"symbol": sym}, "stable") or one(f"cash-flow-statement/{sym}", {"limit": 1}, "v3")
+    gr = one(f"financial-growth/{sym}", {"limit": 1}, "v3") or one("financial-growth", {"symbol": sym, "limit": 1}, "stable")
+
+    hi, lo = _parse_range_high_low(prof.get("range"))
+    set_missing("regularMarketPrice", q.get("price"), prof.get("price"))
+    info["currentPrice"] = info.get("currentPrice") or info.get("regularMarketPrice")
+    set_missing("marketCap", q.get("marketCap"), q.get("marketCapitalization"), prof.get("mktCap"), prof.get("marketCap"))
+    set_missing("volume", q.get("volume"), prof.get("volAvg"))
+    set_missing("averageVolume", q.get("avgVolume"), q.get("avgVolume10D"), q.get("averageVolume"), prof.get("volAvg"))
+    if info.get("averageVolume") in (None, "", 0, 0.0) and hist is not None and not getattr(hist, "empty", True) and "Volume" in hist.columns:
+        try:
+            av = pd.to_numeric(hist["Volume"], errors="coerce").dropna().tail(60).mean()
+            if np.isfinite(av) and av > 0:
+                info["averageVolume"] = float(av)
+        except Exception:
+            pass
+    set_missing("beta", prof.get("beta"), q.get("beta"))
+    set_missing("fiftyTwoWeekHigh", q.get("yearHigh"), q.get("fiftyTwoWeekHigh"), prof.get("fiftyTwoWeekHigh"), hi)
+    set_missing("fiftyTwoWeekLow", q.get("yearLow"), q.get("fiftyTwoWeekLow"), prof.get("fiftyTwoWeekLow"), lo)
+    set_missing("sharesOutstanding", q.get("sharesOutstanding"), prof.get("sharesOutstanding"))
+
+    set_missing("trailingEps", q.get("eps"), inc.get("eps"), inc.get("epsTTM"), km.get("netIncomePerShareTTM"))
+    set_missing("trailingPE", q.get("pe"), q.get("peRatio"), prof.get("pe"), km.get("peRatioTTM"), rt.get("priceEarningsRatioTTM"))
+    set_missing("forwardPE", q.get("forwardPE"), km.get("forwardPERatioTTM"), km.get("priceToEarningsRatioTTM"), info.get("trailingPE"))
+    set_missing("pegRatio", km.get("pegRatioTTM"), rt.get("priceEarningsToGrowthRatioTTM"))
+    set_missing("priceToSalesTrailing12Months", km.get("priceToSalesRatioTTM"), rt.get("priceToSalesRatioTTM"))
+    set_missing("priceToBook", km.get("pbRatioTTM"), km.get("priceToBookRatioTTM"), rt.get("priceToBookRatioTTM"))
+    set_missing("enterpriseToEbitda", km.get("evToEBITDATTM"), km.get("enterpriseValueOverEBITDATTM"), rt.get("enterpriseValueMultipleTTM"))
+    set_missing("enterpriseToRevenue", km.get("evToSalesRatioTTM"))
+    set_missing("totalRevenue", inc.get("revenue"), inc.get("revenueTTM"), km.get("revenueTTM"))
+    set_missing("netIncomeToCommon", inc.get("netIncome"), inc.get("netIncomeTTM"))
+    set_missing("ebitda", inc.get("ebitda"), inc.get("ebitdaTTM"), km.get("ebitdaTTM"))
+    set_missing("grossMargins", rt.get("grossProfitMarginTTM"), km.get("grossProfitMarginTTM"), pctval=True)
+    set_missing("operatingMargins", rt.get("operatingProfitMarginTTM"), km.get("operatingProfitMarginTTM"), pctval=True)
+    set_missing("profitMargins", rt.get("netProfitMarginTTM"), km.get("netProfitMarginTTM"), pctval=True)
+    set_missing("returnOnEquity", rt.get("returnOnEquityTTM"), km.get("roeTTM"), km.get("returnOnEquityTTM"), pctval=True)
+    set_missing("returnOnAssets", rt.get("returnOnAssetsTTM"), km.get("roaTTM"), km.get("returnOnAssetsTTM"), pctval=True)
+    set_missing("currentRatio", rt.get("currentRatioTTM"), km.get("currentRatioTTM"))
+    set_missing("quickRatio", rt.get("quickRatioTTM"), km.get("quickRatioTTM"))
+    set_missing("payoutRatio", rt.get("payoutRatioTTM"), km.get("payoutRatioTTM"), pctval=True)
+    de = n(rt.get("debtEquityRatioTTM"), rt.get("debtToEquityRatioTTM"), km.get("debtToEquityTTM"), default=None)
+    if info.get("debtToEquity") in (None, "", 0, 0.0) and de is not None:
+        info["debtToEquity"] = de * 100 if abs(de) < 20 else de
+    set_missing("totalDebt", bal.get("totalDebt"), bal.get("shortTermDebt"), bal.get("longTermDebt"))
+    set_missing("totalCash", bal.get("cashAndCashEquivalents"), bal.get("cashAndShortTermInvestments"))
+    set_missing("freeCashflow", cf.get("freeCashFlow"), cf.get("freeCashFlowTTM"), km.get("freeCashFlowTTM"))
+    set_missing("operatingCashflow", cf.get("operatingCashFlow"), cf.get("netCashProvidedByOperatingActivities"))
+    set_missing("revenueGrowth", gr.get("revenueGrowth"), gr.get("growthRevenue"), pctval=True)
+    set_missing("earningsGrowth", gr.get("epsgrowth"), gr.get("epsGrowth"), gr.get("growthEPS"), pctval=True)
+
+    equity = n(bal.get("totalStockholdersEquity"), bal.get("totalShareholdersEquity"), default=None)
+    shares = n(info.get("sharesOutstanding"), q.get("sharesOutstanding"), prof.get("sharesOutstanding"), default=None)
+    if info.get("bookValue") in (None, "", 0, 0.0):
+        bvps = n(km.get("bookValuePerShareTTM"), default=None)
+        if bvps is not None:
+            info["bookValue"] = bvps
+        elif equity is not None and shares not in (None, 0):
+            info["bookValue"] = equity / shares
+
+    price = n(info.get("regularMarketPrice"), info.get("currentPrice"), default=None)
+    eps = n(info.get("trailingEps"), default=None)
+    mcap = n(info.get("marketCap"), default=None)
+    rev = n(info.get("totalRevenue"), default=None)
+    if info.get("sharesOutstanding") in (None, "", 0, 0.0) and mcap not in (None, 0) and price not in (None, 0):
+        info["sharesOutstanding"] = mcap / price
+    if info.get("trailingPE") in (None, "", 0, 0.0) and price not in (None, 0) and eps not in (None, 0):
+        info["trailingPE"] = price / eps
+    if info.get("forwardPE") in (None, "", 0, 0.0) and info.get("trailingPE") not in (None, "", 0, 0.0):
+        info["forwardPE"] = info["trailingPE"]
+    if info.get("priceToSalesTrailing12Months") in (None, "", 0, 0.0) and mcap not in (None, 0) and rev not in (None, 0):
+        info["priceToSalesTrailing12Months"] = mcap / rev
+    if info.get("pegRatio") in (None, "", 0, 0.0):
+        pe = n(info.get("trailingPE"), default=None)
+        eg = n(info.get("earningsGrowth"), default=None)
+        if pe is not None and eg not in (None, 0):
+            info["pegRatio"] = pe / (eg * 100 if abs(eg) < 3 else eg)
+    return info
+
+
 def _fmp_news_items(ticker="", limit=50):
     params = {"limit": int(limit)}
     if ticker:
@@ -1318,7 +1433,8 @@ class _FMPTicker:
         return self.get_info()
 
     def get_info(self):
-        return _fmp_build_info(self.symbol) or {"symbol": self.symbol, "shortName": self.symbol, "longName": self.symbol}
+        base = _fmp_build_info(self.symbol) or {"symbol": self.symbol, "shortName": self.symbol, "longName": self.symbol}
+        return _fmp_repair_ui_fields(base, self.symbol, None)
 
     def history(self, period="1y", interval="1d", auto_adjust=True, prepost=False, **kwargs):
         del auto_adjust, prepost, kwargs
@@ -1373,6 +1489,7 @@ def _fetch_stock_uncached(ticker, period="2y"):
         info = _fmp_build_info(ticker)
         if not info:
             info = {"symbol": _fmp_symbol(ticker), "shortName": _fmp_symbol(ticker), "longName": _fmp_symbol(ticker)}
+        info = _fmp_repair_ui_fields(info, ticker, hist)
         return {"info": info, "hist": hist}, None
     except Exception as e:
         return None, str(e)
