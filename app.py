@@ -915,6 +915,7 @@ def _fmp_statement_df(endpoint, ticker, limit=8, period=None):
 
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def _fmp_build_info(ticker):
     """Build a Yahoo-compatible info dict from FMP.
 
@@ -1453,6 +1454,8 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
                         if k in merged and merged[k] not in (None, "", 0, 0.0) and v in (0, 0.0, "0", "0.0"):
                             continue
                         merged[k] = v
+                if SMARTSTOCK_FAST_MODE and merged:
+                    break          # stop after first endpoint that returned data
             except Exception:
                 continue
         return merged
@@ -1669,8 +1672,7 @@ class _FMPTicker:
         return self.get_info()
 
     def get_info(self):
-        base = _fmp_build_info(self.symbol) or {"symbol": self.symbol, "shortName": self.symbol, "longName": self.symbol}
-        return _fmp_repair_ui_fields(base, self.symbol, None)
+        return _fmp_build_info(self.symbol) or {"symbol": self.symbol, "shortName": self.symbol, "longName": self.symbol}
 
     def history(self, period="1y", interval="1d", auto_adjust=True, prepost=False, **kwargs):
         del auto_adjust, prepost, kwargs
@@ -1785,7 +1787,7 @@ def fetch_spy(period="2y"):
     return _fmp_ticker("SPY").history(period=period, auto_adjust=True)
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_financial_reports(ticker):
     try:
         tk = _fmp_ticker(ticker)
@@ -2022,6 +2024,7 @@ def technical_signal_model(df, fallback_price=None):
 # ══════════════════════════════════════════════════════════════════
 #  TECHNICALS
 # ══════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=1800, show_spinner=False)
 def calc_ta(df):
     """Calculate indicators safely, even on short daily/intraday windows."""
     df = df.copy()
@@ -2144,6 +2147,7 @@ def find_sr(df, window=15, n=3):
 # ══════════════════════════════════════════════════════════════════
 #  RISK
 # ══════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=1800, show_spinner=False)
 def calc_risk(hist, spy):
     """Risk metrics using date-aligned daily returns.
 
@@ -6523,14 +6527,13 @@ def main():
 
     # Load the exact data needed by the selected section after active_tab is known.
     if active_tab == "overview":
-        with st.spinner("Fetching chart window…"):
+        with st.spinner("Loading chart…"):
             chart_hist, chart_err = fetch_chart_history(ticker, chart_cfg["period"], chart_cfg["interval"], show_ext_hours)
             if chart_err or chart_hist is None or chart_hist.empty:
                 chart_hist = hist
                 st.warning(f"Recent chart data was unavailable, so the chart fell back to {period_label}: {chart_err}")
             elif chart_is_intraday and not show_ext_hours and uses_us_regular_session_symbol(ticker):
                 chart_hist = regular_session_only(chart_hist)
-        with st.spinner("Calculating chart indicators…"):
             chart_ta = calc_ta(chart_hist)
 
     if active_tab == "ai_thesis":
@@ -6811,8 +6814,10 @@ def main():
         risk_chart_period = rcfg1.selectbox("Risk chart range", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "20y"], index=1, key="risk_chart_period")
         rcfg2.caption("Risk charts use their own range. Default is 3 months.")
         with st.spinner(f"Updating risk charts for {risk_chart_period}..."):
-            risk_data, risk_err = fetch_stock(ticker, risk_chart_period)
-            risk_hist_local = risk_data["hist"] if risk_data and not risk_err else hist
+            risk_hist_local, risk_err = fetch_chart_history(ticker, risk_chart_period, "1d")
+            if risk_err or risk_hist_local is None or risk_hist_local.empty:
+                risk_hist_local = hist
+                risk_err = None
             risk_ta_local = calc_ta(risk_hist_local)
             risk_spy_local = fetch_spy(risk_chart_period)
             risk_view = calc_risk(risk_hist_local, risk_spy_local)
@@ -6942,8 +6947,9 @@ def main():
         tech_chart_period = tcfg1.selectbox("Technical chart range", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "20y"], index=1, key="tech_chart_period")
         tcfg2.caption("Technical indicators and charts use their own range. Default is 3 months.")
         with st.spinner(f"Updating technical charts for {tech_chart_period}..."):
-            tech_data, tech_err = fetch_stock(ticker, tech_chart_period)
-            tech_hist_local = tech_data["hist"] if tech_data and not tech_err else hist
+            tech_hist_local, tech_err = fetch_chart_history(ticker, tech_chart_period, "1d")
+            if tech_err or tech_hist_local is None or tech_hist_local.empty:
+                tech_hist_local = hist
             tech_ta = calc_ta(tech_hist_local)
             tech_days = 99999
 
