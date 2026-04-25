@@ -6291,7 +6291,7 @@ def main():
         </div>""", unsafe_allow_html=True)
 
         if "ticker" not in st.session_state:
-            st.session_state.ticker = "NVDA"
+            st.session_state.ticker = "AAPL"
 
         st.markdown(f'<div style="font-size:10px;color:#475569;text-transform:uppercase;'
                     f'letter-spacing:0.1em;margin:0.2rem 0 0.45rem">{tr("Ticker Symbol")}</div>',
