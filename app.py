@@ -5982,8 +5982,6 @@ def _ranking_note(pct, vol20, vol_ratio):
     if vol20 > 55: return "High volatility; suitable for active trading but position size should be smaller."
     if abs(pct) < 0.5 and vol20 < 25: return "Stable move; better for trend confirmation than short-term momentum."
     return "Moderate move; compare with sector and volume confirmation."
-
-
 @st.cache_data(ttl=900, show_spinner=False)
 def ranking_snapshot(tickers_tuple, period="3mo"):
     """Build the Market Rankings table without crashing when the ranking tab loads.
