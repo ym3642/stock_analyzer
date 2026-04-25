@@ -8,6 +8,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import streamlit as st
+import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
@@ -19,25 +20,70 @@ import xml.etree.ElementTree as ET
 import html
 import time
 import requests
-from requests.adapters import HTTPAdapter
-try:
-    from urllib3.util.retry import Retry
-except Exception:
-    Retry = None
-import hashlib
 import json, re, copy, math
 
-# ── FMP-only compatibility helpers ────────────────────────────────
-# All market/fundamental/news data is routed through Financial Modeling Prep.
-# The compatibility _fmp_ticker() name is kept only so the rest of the app UI can stay unchanged.
-def _fmp_ticker(symbol, proxy=None):
-    return _FMPTicker(symbol)
+# ── Patch yfinance downloader with browser User-Agent ────────────
+import yfinance.utils as _yf_utils
+_orig_get_json = getattr(_yf_utils, "get_json", None)
 
-def _fmp_history_safe(ticker_obj, retries=3, **kwargs):
+try:
+    import curl_cffi  # noqa: F401 — used by yfinance internally if installed
+except ImportError:
+    pass
+
+# Monkey-patch requests User-Agent so all yfinance calls look like Chrome
+_YF_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+}
+try:
+    import yfinance.data as _yfd
+    if hasattr(_yfd, "YfData"):
+        _orig_init = _yfd.YfData.__init__
+        def _patched_init(self, *args, **kwargs):
+            _orig_init(self, *args, **kwargs)
+            if hasattr(self, "session") and self.session is not None:
+                self.session.headers.update(_YF_HEADERS)
+        _yfd.YfData.__init__ = _patched_init
+except Exception:
+    pass
+
+# ── Free rotating proxy list for Yahoo Finance ───────────────────
+_YF_PROXIES = [
+    None,   # try direct first
+    "https://query1.finance.yahoo.com",
+    "https://query2.finance.yahoo.com",
+]
+
+def _yf_ticker(symbol, proxy=None):
+    """Simple yfinance Ticker wrapper."""
     try:
-        return ticker_obj.history(**kwargs)
+        if proxy:
+            return yf.Ticker(symbol, proxy=proxy)
+        return yf.Ticker(symbol)
     except Exception:
-        return pd.DataFrame()
+        return yf.Ticker(symbol)
+
+# ── Yahoo Finance rate-limit retry helper ─────────────────────────
+def _yf_history_safe(ticker_obj, retries=3, **kwargs):
+    """Wrap yfinance history() with exponential backoff for rate limits."""
+    import time as _time
+    for attempt in range(retries):
+        try:
+            h = ticker_obj.history(**kwargs)
+            if h is not None and not h.empty:
+                return h
+        except Exception as e:
+            msg = str(e).lower()
+            if "too many requests" in msg or "rate limit" in msg or "429" in msg:
+                wait = 2 ** attempt
+                _time.sleep(wait)
+                continue
+            raise
+    return pd.DataFrame()
 
 st.set_page_config(
     page_title="SmartStock",
@@ -308,7 +354,7 @@ ZH = {
     "Importance first": "重要性优先", "Newest first": "最新优先", "Update News": "更新新闻", "Update": "更新", "Open source": "打开来源", "Influence": "股价影响", "Importance": "重要性",
     "No short summary was provided by the source.": "来源未提供简短摘要。", "No matching recent news found. Try a broader keyword or click Update News.": "未找到匹配的近期新闻。请尝试更宽泛的关键词，或点击更新新闻。",
     "Latest Market News": "最新全球市场新闻", "Market news by importance/time with AI-style impact analysis.": "按重要性/发布时间排序的全球市场新闻，并带AI风格影响分析。", "Country Filter": "国家筛选", "Category Filter": "类别筛选", "Industry Impact Filter": "行业影响筛选", "Update Market News": "更新市场新闻",
-    "Priority: FMP first, then WSJ/RSS and broad financial news. Duplicate/overlapping headlines are filtered.": "优先级：FMP优先，其次为WSJ/RSS和其他财经新闻；重复或重叠标题会被过滤。",
+    "Priority: Yahoo Finance/yfinance first, then WSJ/RSS and broad financial news. Duplicate/overlapping headlines are filtered.": "优先级：Yahoo Finance/yfinance优先，其次为WSJ/RSS和其他财经新闻；重复或重叠标题会被过滤。",
     "Market Movers & Volatility Ranking": "市场异动与波动率排名", "Global Index Performance": "全球主要指数表现", "Industry Filter": "行业筛选", "Ranking Size": "排名数量", "Ranking Metric": "排名指标", "Update Rankings": "更新排名", "Top Movers Table": "异动股票表", "Top Price Change Chart": "价格变动排名图", "Top Volatility Chart": "波动率排名图", "All Industries": "全部行业", "Technology": "科技", "Semiconductors": "半导体", "Software": "软件", "Financials": "金融", "Energy": "能源", "Healthcare": "医疗保健", "Consumer": "消费", "Ticker": "股票代码", "Company": "公司", "Last Price": "最新价", "Change $": "价格变化$", "Change %": "涨跌幅%", "20D Vol %": "20日波动率%", "Volume Ratio": "成交量倍数", "Investment Note": "投资备注", "Major Index Curves": "主要指数走势", "Index Ranking by % Change": "按涨跌幅排名的指数", "Commodity Dashboard": "大宗商品仪表盘", "Commodity Curves": "大宗商品走势", "Commodity Indicators": "大宗商品指标", "Display indexes on chart": "选择图表显示的指数", "Display commodities on chart": "选择图表显示的大宗商品",
 }
 
@@ -375,7 +421,7 @@ ZH.update({
     "Materials": "材料",
     "Crypto": "加密资产",
     "No broad market news matched these filters. Try a broader keyword, ticker, country, category, or industry filter.": "没有符合筛选条件的市场新闻。请尝试更宽泛的关键词、股票代码、国家/地区、类别或行业筛选。",
-    "Market news by importance/time with AI-style impact analysis. Sources prioritize FMP and WSJ first, then reliable broad RSS discovery.": "按重要性/发布时间展示全球市场新闻，并提供AI风格影响分析。来源优先使用FMP和WSJ，其次使用可靠的广泛RSS新闻。",
+    "Market news by importance/time with AI-style impact analysis. Sources prioritize yfinance/Yahoo Finance and WSJ first, then reliable broad RSS discovery.": "按重要性/发布时间展示全球市场新闻，并提供AI风格影响分析。来源优先使用yfinance/Yahoo Finance和WSJ，其次使用可靠的广泛RSS新闻。",
 })
 
 
@@ -545,1048 +591,135 @@ def legend_html(items):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  DATA LAYER — FMP ONLY, YFINANCE-COMPATIBLE FIELD MAP
+#  DATA LAYER — yfinance only, local version, no FMP key required
 # ══════════════════════════════════════════════════════════════════
-import os as _os
-_FMP_V3_BASE = "https://financialmodelingprep.com/api/v3"
-_FMP_STABLE_BASE = "https://financialmodelingprep.com/stable"
-_FMP_BASE = _FMP_V3_BASE
 
-
-# ── Performance / API-limit controls ──────────────────────────────
-# Default FAST mode uses first successful FMP endpoint in each fallback group
-# instead of calling every possible endpoint. Set SMARTSTOCK_DEEP_FMP=1 only
-# when you want maximum field coverage and can tolerate many more API calls.
-def _secret_or_env_bool(name, default=False):
+def _normalize_yf_history(df):
+    """Return a clean yfinance-style OHLCV DataFrame."""
     try:
-        val = st.secrets.get(name, None)
-    except Exception:
-        val = None
-    if val is None:
-        val = _os.environ.get(name, None)
-    if val is None:
-        return bool(default)
-    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-SMARTSTOCK_FAST_MODE = not _secret_or_env_bool("SMARTSTOCK_DEEP_FMP", default=False)
-FMP_TIMEOUT_SECONDS = float(_os.environ.get("SMARTSTOCK_FMP_TIMEOUT", "10"))
-FMP_RAW_CACHE_TTL = int(_os.environ.get("SMARTSTOCK_FMP_RAW_CACHE_TTL", "3600"))
-_FMP_V4_BASE = "https://financialmodelingprep.com/api/v4"
-
-@st.cache_resource(show_spinner=False)
-def _http_session():
-    sess = requests.Session()
-    sess.headers.update({
-        "User-Agent": "SmartStock/2.1 (+https://streamlit.io)",
-        "Accept": "application/json,text/plain,*/*",
-        "Connection": "keep-alive",
-    })
-    try:
-        if Retry is not None:
-            retry = Retry(
-                total=2,
-                connect=2,
-                read=2,
-                backoff_factor=0.25,
-                status_forcelist=(429, 500, 502, 503, 504),
-                allowed_methods=frozenset(["GET"]),
-                raise_on_status=False,
-            )
-            adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32, max_retries=retry)
-            sess.mount("https://", adapter)
-            sess.mount("http://", adapter)
-    except Exception:
-        pass
-    return sess
-
-def _params_items(params):
-    return tuple(sorted((str(k), "" if v is None else str(v)) for k, v in dict(params or {}).items()))
-
-def _key_fingerprint(key):
-    return hashlib.sha1(str(key or "").encode("utf-8")).hexdigest()[:10]
-
-@st.cache_data(ttl=FMP_RAW_CACHE_TTL, show_spinner=False)
-def _fmp_get_cached(endpoint, params_items, base, key_fingerprint):
-    """Cached raw FMP/RSS HTTP layer. Keeps repeated reruns from burning API limits."""
-    del key_fingerprint
-    key = _get_fmp_key()
-    if not key:
-        return {"__smartstock_error__": "FMP_API_KEY is missing in Streamlit Secrets/environment."}
-
-    endpoint = str(endpoint).lstrip("/")
-    base_l = str(base or "v3").lower()
-    if base_l == "stable":
-        base_url = _FMP_STABLE_BASE
-    elif base_l == "v4":
-        base_url = _FMP_V4_BASE
-    else:
-        base_url = _FMP_V3_BASE
-
-    p = {k: v for k, v in tuple(params_items or ())}
-    p["apikey"] = key
-    try:
-        r = _http_session().get(f"{base_url}/{endpoint}", params=p, timeout=FMP_TIMEOUT_SECONDS)
-        if r.status_code != 200:
-            return {"__smartstock_error__": f"FMP HTTP {r.status_code} from /{endpoint}: {r.text[:500]}"}
-        try:
-            data = r.json()
-        except Exception:
-            return {"__smartstock_error__": f"FMP returned non-JSON from /{endpoint}: {r.text[:500]}"}
-        return data
-    except Exception as e:
-        return {"__smartstock_error__": f"FMP request failed for {endpoint}: {e}"}
-
-
-def _get_fmp_key():
-    """Load the FMP key for Streamlit Cloud or local runs.
-
-    Streamlit Cloud secrets:
-        FMP_API_KEY = "your_key"
-
-    Local PowerShell:
-        $env:FMP_API_KEY="your_key"
-    """
-    # Streamlit Secrets: flat keys
-    try:
-        for name in ("FMP_API_KEY", "fmp_api_key", "FINANCIAL_MODELING_PREP_API_KEY"):
+        if df is None or df.empty:
+            return pd.DataFrame()
+        out = df.copy()
+        # yfinance.download can return MultiIndex columns for one or more tickers.
+        if isinstance(out.columns, pd.MultiIndex):
             try:
-                key = st.secrets.get(name, "")
+                out.columns = out.columns.get_level_values(0)
             except Exception:
-                key = ""
-            if key:
-                return str(key).strip()
+                out.columns = [c[0] if isinstance(c, tuple) else c for c in out.columns]
+        rename = {
+            "open": "Open", "high": "High", "low": "Low", "close": "Close",
+            "adj close": "Adj Close", "volume": "Volume",
+        }
+        out = out.rename(columns={c: rename.get(str(c).strip().lower(), c) for c in out.columns})
+        if "Close" not in out.columns and "Adj Close" in out.columns:
+            out["Close"] = out["Adj Close"]
+        keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in out.columns]
+        out = out[keep].copy()
+        for col in keep:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+        if "Volume" not in out.columns:
+            out["Volume"] = 0
+        return out.dropna(subset=["Close"])
     except Exception:
-        pass
+        return pd.DataFrame()
 
-    # Streamlit Secrets: nested section [fmp]
+
+def _yf_get_info_safe(ticker_obj):
+    """Safely read yfinance info without breaking the app if Yahoo throttles one field."""
+    info = {}
     try:
-        section = st.secrets.get("fmp", {})
-        if isinstance(section, dict):
-            for name in ("api_key", "FMP_API_KEY", "key"):
-                key = section.get(name, "")
-                if key:
-                    return str(key).strip()
+        info = ticker_obj.get_info() or {}
     except Exception:
-        pass
-
-    # Local environment variables
-    for name in ("FMP_API_KEY", "fmp_api_key", "FINANCIAL_MODELING_PREP_API_KEY"):
-        key = _os.environ.get(name, "")
-        if key:
-            return str(key).strip()
-    return ""
-
-
-_FMP_SYMBOL_MAP = {
-    "^GSPC": "SPY", "^DJI": "DIA", "^IXIC": "QQQ", "^RUT": "IWM", "^VIX": "VIXY",
-    "CL=F": "USO", "BZ=F": "BNO", "GC=F": "GLD", "SI=F": "SLV", "HG=F": "CPER", "NG=F": "UNG",
-    "BTC-USD": "BTCUSD", "ETH-USD": "ETHUSD",
-}
-
-
-def _fmp_symbol(symbol):
-    s = str(symbol or "").upper().strip()
-    return _FMP_SYMBOL_MAP.get(s, s)
-
-
-def _period_to_days(period, default=730):
-    txt = str(period or "2y").lower().strip()
-    if txt == "max":
-        return 7300
-    m = re.fullmatch(r"(\d+)(d|mo|y)", txt)
-    if not m:
-        return default
-    n, unit = int(m.group(1)), m.group(2)
-    return n if unit == "d" else n * 30 if unit == "mo" else n * 365
-
-
-def _remember_fmp_error(message):
-    try:
-        st.session_state["_last_fmp_error"] = clean_text(str(message))[:800]
-    except Exception:
-        pass
-
-
-def _fmp_get(endpoint, params=None, base="v3"):
-    """Call FMP and return JSON, rejecting API-error payloads.
-
-    Uses a cached, pooled HTTP layer to avoid repeating identical requests on
-    every Streamlit rerun. Supports base="v3", base="v4", and base="stable".
-    """
-    try:
-        key = _get_fmp_key()
-        if not key:
-            _remember_fmp_error("FMP_API_KEY is missing in Streamlit Secrets/environment.")
-            return None
-
-        data = _fmp_get_cached(
-            str(endpoint).lstrip("/"),
-            _params_items(params),
-            str(base or "v3").lower(),
-            _key_fingerprint(key),
-        )
-        if isinstance(data, dict) and "__smartstock_error__" in data:
-            _remember_fmp_error(data.get("__smartstock_error__", "Unknown FMP error"))
-            return None
-
-        if isinstance(data, dict):
-            lowered = {str(k).lower(): v for k, v in data.items()}
-            if "error" in lowered or "error message" in lowered:
-                _remember_fmp_error(str(data)[:800])
-                return None
-            if "message" in lowered and not any(k in lowered for k in ("historical", "symbol", "date", "price", "results", "data")):
-                _remember_fmp_error(str(data)[:800])
-                return None
-            return copy.deepcopy(data) if data else None
-        if isinstance(data, list):
-            return copy.deepcopy(data) if len(data) else None
-        return None
-    except Exception as e:
-        _remember_fmp_error(f"FMP request failed for {endpoint}: {e}")
-        return None
-
-
-def _fmp_get_stable(endpoint, params=None):
-    return _fmp_get(endpoint, params=params, base="stable")
-
-
-def _records(data):
-    """Normalize common FMP response shapes to a list of dicts."""
-    if data is None:
-        return []
-    if isinstance(data, list):
-        return [x for x in data if isinstance(x, dict)]
-    if isinstance(data, dict):
-        for key in ("historical", "results", "data", "values"):
-            val = data.get(key)
-            if isinstance(val, list):
-                return [x for x in val if isinstance(x, dict)]
-        # Some stable endpoints return one record as a dict.
-        if any(k in data for k in ("symbol", "date", "price", "marketCap", "mktCap", "companyName")):
-            return [data]
-    return []
-
-
-def _first(data):
-    rows = _records(data)
-    return rows[0] if rows else {}
-
-
-def _num(*values, default=None):
-    for v in values:
-        if v is None or v == "" or v == "None":
-            continue
         try:
-            if isinstance(v, str):
-                v = v.replace(",", "").replace("$", "").replace("%", "").strip()
-            x = float(v)
-            if np.isfinite(x):
-                return x
+            info = ticker_obj.info or {}
         except Exception:
-            continue
-    return default
+            info = {}
+    return info if isinstance(info, dict) else {}
 
 
-def _text(*values, default=""):
-    for v in values:
-        if v is None:
-            continue
-        s = str(v).strip()
-        if s and s.lower() not in {"none", "nan", "null"}:
-            return s
-    return default
-
-
-def _pct_to_decimal(v):
-    x = _num(v, default=None)
-    if x is None:
-        return None
-    # FMP ratios usually return decimals already. If something comes as 12.3, treat it as percent.
-    return x / 100 if abs(x) > 3 else x
-
-
-def _parse_range_high_low(range_value):
-    if not range_value:
-        return None, None
+def _yf_fast_info_safe(ticker_obj):
     try:
-        parts = str(range_value).replace(" ", "").split("-")
-        if len(parts) >= 2:
-            lo = _num(parts[0], default=None)
-            hi = _num(parts[-1], default=None)
-            return hi, lo
+        fi = ticker_obj.fast_info
+        return dict(fi) if fi is not None else {}
     except Exception:
-        pass
-    return None, None
+        return {}
 
 
-def _merge_nonempty(target, updates):
-    for k, v in (updates or {}).items():
-        if v is None or v == "" or (isinstance(v, float) and not np.isfinite(v)):
-            continue
-        # Do not overwrite a real nonzero value with zero from a weaker endpoint.
-        if k in target and target[k] not in (None, "", 0, 0.0) and v in (0, 0.0):
-            continue
-        target[k] = v
-    return target
-
-
-def _normalize_ohlcv(df):
-    if df is None or df.empty:
-        return pd.DataFrame()
-    out = df.copy()
-
-    # FMP stable light can return label/date and price instead of close.
-    rename_map = {
-        "date": "date", "label": "date",
-        "open": "Open", "adjOpen": "Open",
-        "high": "High", "adjHigh": "High",
-        "low": "Low", "adjLow": "Low",
-        "close": "Close", "adjClose": "Close", "price": "Close",
-        "volume": "Volume",
-    }
-    out = out.rename(columns={k: v for k, v in rename_map.items() if k in out.columns})
-
-    if "date" in out.columns:
-        out["date"] = pd.to_datetime(out["date"], errors="coerce")
-        out = out.dropna(subset=["date"]).set_index("date")
-    elif not isinstance(out.index, pd.DatetimeIndex):
-        return pd.DataFrame()
-
-    out = out.sort_index()
-    if "Close" not in out.columns:
-        return pd.DataFrame()
-
-    # Fill OHLC if the endpoint only gave a close/price series.
-    for col in ("Open", "High", "Low"):
-        if col not in out.columns:
-            out[col] = out["Close"]
-    if "Volume" not in out.columns:
-        out["Volume"] = 0
-
-    for col in ["Open", "High", "Low", "Close", "Volume"]:
-        out[col] = pd.to_numeric(out[col], errors="coerce")
-
-    return out[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
-
-
-def _fmp_build_hist(ticker, period="2y"):
-    """Fetch OHLCV history from FMP. Tries multiple current and legacy response shapes."""
-    sym = _fmp_symbol(ticker)
-    days = _period_to_days(period, default=730)
-    try:
-        date_to = pd.Timestamp.today().strftime("%Y-%m-%d")
-        date_from = (pd.Timestamp.today() - pd.Timedelta(days=days + 10)).strftime("%Y-%m-%d")
-
-        attempts = [
-            ("historical-price-full/" + sym, {"timeseries": days}, "v3"),
-            ("historical-price-full/" + sym, {"from": date_from, "to": date_to}, "v3"),
-            ("historical-price-eod/full", {"symbol": sym, "from": date_from, "to": date_to}, "stable"),
-            ("historical-price-eod/light", {"symbol": sym, "from": date_from, "to": date_to}, "stable"),
-            ("historical-price-eod/full", {"symbol": sym}, "stable"),
-            ("historical-price-eod/light", {"symbol": sym}, "stable"),
-        ]
-        for endpoint, params, base in attempts:
-            data = _fmp_get(endpoint, params=params, base=base)
-            rows = _records(data)
-            if not rows:
-                continue
-            df = _normalize_ohlcv(pd.DataFrame(rows))
-            if not df.empty:
-                if len(df) > days + 5:
-                    df = df.tail(days)
-                return df
-
-        # Last-resort one-row quote so the UI does not fully break.
-        q = _first(_fmp_get("quote/" + sym, base="v3")) or _first(_fmp_get("quote", {"symbol": sym}, base="stable"))
-        price = _num(q.get("price"), q.get("previousClose"), q.get("close"), default=None)
-        if price is not None:
-            idx = [pd.Timestamp.today().normalize()]
-            return pd.DataFrame({
-                "Open": [_num(q.get("open"), default=price)],
-                "High": [_num(q.get("dayHigh"), q.get("high"), default=price)],
-                "Low": [_num(q.get("dayLow"), q.get("low"), default=price)],
-                "Close": [price],
-                "Volume": [_num(q.get("volume"), default=0)],
-            }, index=idx)
-        return pd.DataFrame()
-    except Exception as e:
-        _remember_fmp_error(f"FMP historical loader failed for {sym}: {e}")
-        return pd.DataFrame()
-
-
-def _fmp_build_intraday(ticker, period="5d", interval="5m"):
-    interval_map = {
-        "1m": "1min", "2m": "1min", "5m": "5min", "15m": "15min", "30m": "30min",
-        "60m": "1hour", "90m": "1hour", "1h": "1hour", "1hour": "1hour", "4h": "4hour", "4hour": "4hour",
-    }
-    fmp_interval = interval_map.get(str(interval).lower(), str(interval).lower())
-    sym = _fmp_symbol(ticker)
-    try:
-        data = _fmp_get(f"historical-chart/{fmp_interval}/{sym}", base="v3")
-        df = _normalize_ohlcv(pd.DataFrame(_records(data))) if data else pd.DataFrame()
-        if df.empty:
-            return df
-        cutoff = pd.Timestamp.today() - pd.Timedelta(days=_period_to_days(period, default=30))
-        return df[df.index >= cutoff]
-    except Exception as e:
-        _remember_fmp_error(f"FMP intraday loader failed for {sym}: {e}")
-        return pd.DataFrame()
-
-
-def _fmp_statement_rows(endpoint, ticker, limit=8, period=None):
-    sym = _fmp_symbol(ticker)
-    rows = []
-    params = {"limit": limit}
-    if period:
-        params["period"] = period
-    # Try stable first, then v3.
-    stable_params = {"symbol": sym, "limit": limit}
-    if period:
-        stable_params["period"] = period
-    rows = _records(_fmp_get(endpoint, stable_params, base="stable"))
-    if not rows:
-        rows = _records(_fmp_get(f"{endpoint}/{sym}", params, base="v3"))
-    return rows
-
-
-def _fmp_statement_df(endpoint, ticker, limit=8, period=None):
-    rows = _fmp_statement_rows(endpoint, ticker, limit=limit, period=period)
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    if df.empty or "date" not in df.columns:
-        return pd.DataFrame()
-    drop_cols = {"date", "symbol", "reportedCurrency", "cik", "fillingDate", "acceptedDate", "calendarYear", "period", "link", "finalLink"}
-    value_cols = [c for c in df.columns if c not in drop_cols]
-    out = df[["date"] + value_cols].set_index("date").T
-    out.columns = pd.to_datetime(out.columns, errors="ignore")
-    return out
-
-
-
-def _fmp_build_info(ticker):
-    """Build a Yahoo-compatible info dict from FMP.
-
-    This is the main data adapter for the app. The UI and models were originally
-    built around yfinance's ``Ticker.info`` keys, so this function intentionally
-    returns those same key names while sourcing data only from FMP.
-
-    Important design choice:
-    FMP's stable, legacy v3, annual, quarterly, and TTM endpoints can each return
-    different subsets depending on plan and endpoint availability. We therefore
-    merge all usable records instead of stopping at the first successful response.
-    """
-    sym = _fmp_symbol(ticker)
-    info = {"symbol": sym, "quoteType": "EQUITY"}
-
-    def N(*vals, default=None):
-        return _num(*vals, default=default)
-
-    def T(*vals, default=""):
-        return _text(*vals, default=default)
-
-    def P(*vals):
-        for v in vals:
-            x = _pct_to_decimal(v)
-            if x is not None:
-                return x
-        return None
-
-    def rows_all(attempts, stop_after_first=None):
-        """Return records from FMP fallback endpoints.
-
-        In normal FAST mode this stops after the first endpoint that returns
-        usable rows. This cuts first-load API calls dramatically while keeping
-        fallback behavior. Set SMARTSTOCK_DEEP_FMP=1 to merge every fallback
-        endpoint for maximum data coverage.
-        """
-        if stop_after_first is None:
-            stop_after_first = SMARTSTOCK_FAST_MODE
-        out = []
-        seen = set()
-        for endpoint, params, base in attempts:
-            try:
-                data = _fmp_get(endpoint, params=params or {}, base=base)
-                rows = _records(data)
-                if not rows:
-                    continue
-                for row in rows:
-                    key = (endpoint, base, str(row.get("date", "")), str(row.get("calendarYear", "")), str(row.get("symbol", "")))
-                    if key in seen and len(row) < 5:
-                        continue
-                    seen.add(key)
-                    out.append(row)
-                if stop_after_first and out:
-                    return out
-            except Exception:
-                continue
-        return out
-
-    def merge_records(attempts, prefer="later"):
-        """Merge multiple endpoint records into one dict, keeping non-empty values."""
-        merged = {}
-        records = rows_all(attempts)
-        if prefer == "earlier":
-            records = list(reversed(records))
-        for row in records:
-            for k, v in (row or {}).items():
-                if v is None or v == "" or str(v).lower() in {"nan", "none", "null"}:
-                    continue
-                # Keep existing good nonzero value against a weaker zero value.
-                if k in merged and merged[k] not in (None, "", 0, 0.0) and v in (0, 0.0, "0", "0.0"):
-                    continue
-                merged[k] = v
-        return merged
-
-    def first_rows(endpoint, limit=8, period=None):
-        return _fmp_statement_rows(endpoint, sym, limit=limit, period=period)
-
-    try:
-        # ── Profile / quote / market data ───────────────────────────────
-        profile = merge_records([
-            ("profile", {"symbol": sym}, "stable"),
-            (f"profile/{sym}", {}, "v3"),
-            ("company/profile", {"symbol": sym}, "v3"),
-        ])
-        quote = merge_records([
-            (f"quote/{sym}", {}, "v3"),
-            ("quote", {"symbol": sym}, "stable"),
-            ("quote-short", {"symbol": sym}, "stable"),
-            (f"quote-short/{sym}", {}, "v3"),
-        ])
-        market_cap_row = merge_records([
-            ("market-capitalization", {"symbol": sym}, "stable"),
-            (f"market-capitalization/{sym}", {}, "v3"),
-            ("market-capitalization-batch", {"symbols": sym}, "stable"),
-        ])
-        ev = merge_records([
-            (f"enterprise-values/{sym}", {"limit": 4}, "v3"),
-            ("enterprise-values", {"symbol": sym, "limit": 4}, "stable"),
-        ])
-
-        hi_from_range, lo_from_range = _parse_range_high_low(profile.get("range"))
-        price = N(
-            quote.get("price"), quote.get("currentPrice"), quote.get("lastSalePrice"),
-            profile.get("price"), quote.get("previousClose"), quote.get("close"),
-            default=None
-        )
-        market_cap = N(
-            quote.get("marketCap"), quote.get("marketCapitalization"),
-            profile.get("mktCap"), profile.get("marketCap"),
-            market_cap_row.get("marketCap"), market_cap_row.get("marketCapTTM"),
-            ev.get("marketCapitalization"), ev.get("marketCap"),
-            default=None
-        )
-
-        _merge_nonempty(info, {
-            "shortName": T(profile.get("companyName"), profile.get("name"), quote.get("name"), sym),
-            "longName": T(profile.get("companyName"), profile.get("name"), quote.get("name"), sym),
-            "symbol": T(profile.get("symbol"), quote.get("symbol"), sym),
-            "sector": T(profile.get("sector"), quote.get("sector"), default=""),
-            "industry": T(profile.get("industry"), quote.get("industry"), default=""),
-            "country": T(profile.get("country"), default=""),
-            "website": T(profile.get("website"), default=""),
-            "longBusinessSummary": T(profile.get("description"), profile.get("companyDescription"), default=""),
-            "fullTimeEmployees": N(profile.get("fullTimeEmployees"), profile.get("employees"), default=None),
-            "exchange": T(profile.get("exchangeShortName"), profile.get("exchange"), quote.get("exchange"), quote.get("exchangeShortName"), default=""),
-            "currency": T(profile.get("currency"), quote.get("currency"), default="USD"),
-            "ceo": T(profile.get("ceo"), default=""),
-            "logo_url": T(profile.get("image"), default=""),
-            "regularMarketPrice": price,
-            "currentPrice": price,
-            "previousClose": N(quote.get("previousClose"), quote.get("previous_close"), default=None),
-            "open": N(quote.get("open"), default=None),
-            "dayHigh": N(quote.get("dayHigh"), quote.get("high"), default=None),
-            "dayLow": N(quote.get("dayLow"), quote.get("low"), default=None),
-            "marketCap": market_cap,
-            "volume": N(quote.get("volume"), profile.get("volAvg"), default=None),
-            "averageVolume": N(quote.get("avgVolume"), quote.get("avgVolume10D"), profile.get("volAvg"), default=None),
-            "beta": N(profile.get("beta"), quote.get("beta"), default=None),
-            "fiftyTwoWeekHigh": N(quote.get("yearHigh"), quote.get("fiftyTwoWeekHigh"), profile.get("fiftyTwoWeekHigh"), hi_from_range, default=None),
-            "fiftyTwoWeekLow": N(quote.get("yearLow"), quote.get("fiftyTwoWeekLow"), profile.get("fiftyTwoWeekLow"), lo_from_range, default=None),
-            "trailingPE": N(quote.get("pe"), quote.get("peRatio"), profile.get("pe"), default=None),
-            "trailingEps": N(quote.get("eps"), quote.get("epsTTM"), profile.get("eps"), default=None),
-        })
-        last_div = N(profile.get("lastDiv"), quote.get("lastDiv"), default=None)
-        if last_div is not None and price not in (None, 0):
-            info["dividendYield"] = last_div / price
-
-        # ── Ratios / key metrics / estimates ────────────────────────────
-        km = merge_records([
-            (f"key-metrics-ttm/{sym}", {}, "v3"),
-            ("key-metrics-ttm", {"symbol": sym}, "stable"),
-            (f"key-metrics/{sym}", {"limit": 4}, "v3"),
-            ("key-metrics", {"symbol": sym, "limit": 4}, "stable"),
-        ])
-        ratios = merge_records([
-            (f"ratios-ttm/{sym}", {}, "v3"),
-            ("ratios-ttm", {"symbol": sym}, "stable"),
-            ("metrics-ratios-ttm", {"symbol": sym}, "stable"),
-            (f"ratios/{sym}", {"limit": 4}, "v3"),
-            ("ratios", {"symbol": sym, "limit": 4}, "stable"),
-            ("metrics-ratios", {"symbol": sym, "limit": 4}, "stable"),
-        ])
-        growth = merge_records([
-            (f"financial-growth/{sym}", {"limit": 4}, "v3"),
-            ("financial-growth", {"symbol": sym, "limit": 4}, "stable"),
-            ("income-statement-growth", {"symbol": sym, "limit": 4}, "stable"),
-            (f"income-statement-growth/{sym}", {"limit": 4}, "v3"),
-        ])
-
-        pe = N(km.get("peRatioTTM"), ratios.get("priceEarningsRatioTTM"), km.get("peRatio"), ratios.get("priceEarningsRatio"), info.get("trailingPE"), default=None)
-        fpe = N(km.get("priceToEarningsRatioTTM"), km.get("forwardPE"), quote.get("forwardPE"), pe, default=None)
-        ps = N(km.get("priceToSalesRatioTTM"), ratios.get("priceToSalesRatioTTM"), km.get("priceToSalesRatio"), ratios.get("priceToSalesRatio"), default=None)
-        pb = N(km.get("pbRatioTTM"), km.get("priceToBookRatioTTM"), ratios.get("priceToBookRatioTTM"), km.get("pbRatio"), km.get("priceToBookRatio"), ratios.get("priceBookValueRatio"), default=None)
-        peg = N(km.get("pegRatioTTM"), km.get("pegRatio"), ratios.get("priceEarningsToGrowthRatioTTM"), ratios.get("pegRatio"), default=None)
-        ev_to_ebitda = N(km.get("evToEBITDATTM"), km.get("enterpriseValueOverEBITDATTM"), km.get("enterpriseValueOverEBITDA"), ratios.get("enterpriseValueMultipleTTM"), default=None)
-        ev_to_rev = N(km.get("evToSalesRatioTTM"), km.get("evToSalesRatio"), km.get("enterpriseValueOverRevenue"), default=None)
-
-        _merge_nonempty(info, {
-            "trailingPE": pe,
-            "forwardPE": fpe,
-            "priceToSalesTrailing12Months": ps,
-            "priceToBook": pb,
-            "pegRatio": peg,
-            "enterpriseToEbitda": ev_to_ebitda,
-            "enterpriseToRevenue": ev_to_rev,
-            "returnOnEquity": P(km.get("roeTTM"), km.get("returnOnEquityTTM"), km.get("roe"), ratios.get("returnOnEquityTTM"), ratios.get("returnOnEquity")),
-            "returnOnAssets": P(km.get("roaTTM"), km.get("returnOnAssetsTTM"), km.get("roa"), ratios.get("returnOnAssetsTTM"), ratios.get("returnOnAssets")),
-            "currentRatio": N(km.get("currentRatioTTM"), km.get("currentRatio"), ratios.get("currentRatioTTM"), ratios.get("currentRatio"), default=None),
-            "quickRatio": N(km.get("quickRatioTTM"), km.get("quickRatio"), ratios.get("quickRatioTTM"), ratios.get("quickRatio"), default=None),
-            "payoutRatio": P(km.get("payoutRatioTTM"), km.get("payoutRatio"), ratios.get("payoutRatioTTM"), ratios.get("payoutRatio")),
-            "dividendYield": P(km.get("dividendYieldTTM"), km.get("dividendYield"), ratios.get("dividendYieldTTM"), info.get("dividendYield")),
-        })
-
-        debt_equity_raw = N(km.get("debtToEquityTTM"), km.get("debtToEquity"), ratios.get("debtEquityRatioTTM"), ratios.get("debtToEquityRatioTTM"), ratios.get("debtEquityRatio"), ratios.get("debtToEquityRatio"), default=None)
-        if debt_equity_raw is not None:
-            info["debtToEquity"] = debt_equity_raw * 100 if abs(debt_equity_raw) < 20 else debt_equity_raw
-
-        # ── Financial statements: TTM + latest annual + latest quarterly ─
-        income_ttm = merge_records([
-            (f"income-statement-ttm/{sym}", {}, "v3"),
-            ("income-statement-ttm", {"symbol": sym}, "stable"),
-        ])
-        balance_ttm = merge_records([
-            (f"balance-sheet-statement-ttm/{sym}", {}, "v3"),
-            ("balance-sheet-statement-ttm", {"symbol": sym}, "stable"),
-        ])
-        cash_ttm = merge_records([
-            (f"cash-flow-statement-ttm/{sym}", {}, "v3"),
-            ("cash-flow-statement-ttm", {"symbol": sym}, "stable"),
-        ])
-
-        income_annual = first_rows("income-statement", limit=6, period="annual")
-        income_quarter = first_rows("income-statement", limit=8, period="quarter")
-        balance_annual = first_rows("balance-sheet-statement", limit=6, period="annual")
-        balance_quarter = first_rows("balance-sheet-statement", limit=8, period="quarter")
-        cash_annual = first_rows("cash-flow-statement", limit=6, period="annual")
-        cash_quarter = first_rows("cash-flow-statement", limit=8, period="quarter")
-
-        # Prefer TTM for flow items, otherwise annual, otherwise latest quarter.
-        latest_income = {}
-        for row in ([income_quarter[0]] if income_quarter else []) + ([income_annual[0]] if income_annual else []) + ([income_ttm] if income_ttm else []):
-            _merge_nonempty(latest_income, row)
-        # For balance sheet, latest quarter is usually more current than annual/TTM.
-        latest_balance = {}
-        for row in ([balance_annual[0]] if balance_annual else []) + ([balance_ttm] if balance_ttm else []) + ([balance_quarter[0]] if balance_quarter else []):
-            _merge_nonempty(latest_balance, row)
-        latest_cash = {}
-        for row in ([cash_quarter[0]] if cash_quarter else []) + ([cash_annual[0]] if cash_annual else []) + ([cash_ttm] if cash_ttm else []):
-            _merge_nonempty(latest_cash, row)
-
-        prev_income = income_annual[1] if len(income_annual) > 1 else (income_quarter[4] if len(income_quarter) > 4 else income_quarter[1] if len(income_quarter) > 1 else {})
-
-        shares = N(
-            quote.get("sharesOutstanding"), profile.get("sharesOutstanding"),
-            ev.get("numberOfShares"), ev.get("sharesNumber"),
-            km.get("weightedAverageShsOutTTM"), latest_income.get("weightedAverageShsOut"),
-            latest_income.get("weightedAverageShsOutDil"), market_cap and price and market_cap / price,
-            default=None
-        )
-        rev_now = N(latest_income.get("revenue"), latest_income.get("revenueTTM"), km.get("revenueTTM"), (km.get("revenuePerShareTTM") * shares if N(km.get("revenuePerShareTTM"), default=None) is not None and shares else None), default=None)
-        rev_prev = N(prev_income.get("revenue"), default=None)
-        eps_now = N(latest_income.get("eps"), latest_income.get("epsTTM"), latest_income.get("epsdiluted"), latest_income.get("epsDiluted"), km.get("netIncomePerShareTTM"), info.get("trailingEps"), default=None)
-        eps_prev = N(prev_income.get("eps"), prev_income.get("epsdiluted"), prev_income.get("epsDiluted"), default=None)
-        net_income = N(latest_income.get("netIncome"), latest_income.get("netIncomeTTM"), latest_income.get("netIncomeCommonStockholders"), latest_income.get("netIncomeAvailableToCommonShareholders"), default=None)
-        ebitda = N(latest_income.get("ebitda"), latest_income.get("ebitdaTTM"), km.get("ebitdaTTM"), default=None)
-        if ebitda is None:
-            oi = N(latest_income.get("operatingIncome"), default=None)
-            da = N(latest_income.get("depreciationAndAmortization"), latest_cash.get("depreciationAndAmortization"), default=None)
-            if oi is not None and da is not None:
-                ebitda = oi + da
-
-        std = N(latest_balance.get("shortTermDebt"), latest_balance.get("shortTermBorrowings"), default=0) or 0
-        ltd = N(latest_balance.get("longTermDebt"), latest_balance.get("longTermDebtNoncurrent"), default=0) or 0
-        total_debt = N(latest_balance.get("totalDebt"), latest_balance.get("totalDebtTTM"), std + ltd if (std or ltd) else None, default=None)
-        total_cash = N(latest_balance.get("cashAndCashEquivalents"), latest_balance.get("cashAndShortTermInvestments"), latest_balance.get("cashCashEquivalentsAndShortTermInvestments"), default=None)
-        total_equity = N(latest_balance.get("totalStockholdersEquity"), latest_balance.get("totalShareholdersEquity"), latest_balance.get("totalEquity"), default=None)
-        total_assets = N(latest_balance.get("totalAssets"), default=None)
-        current_assets = N(latest_balance.get("totalCurrentAssets"), default=None)
-        current_liabilities = N(latest_balance.get("totalCurrentLiabilities"), default=None)
-
-        ocf = N(latest_cash.get("operatingCashFlow"), latest_cash.get("netCashProvidedByOperatingActivities"), latest_cash.get("netCashProvidedByOperatingActivitiesTTM"), default=None)
-        capex = N(latest_cash.get("capitalExpenditure"), latest_cash.get("capitalExpenditures"), latest_cash.get("capitalExpenditureTTM"), default=None)
-        fcf = N(latest_cash.get("freeCashFlow"), latest_cash.get("freeCashFlowTTM"), km.get("freeCashFlowTTM"), default=None)
-        if fcf is None and ocf is not None and capex is not None:
-            fcf = ocf + capex
-
-        revenue_growth = (rev_now - rev_prev) / abs(rev_prev) if rev_now is not None and rev_prev not in (None, 0) else None
-        earnings_growth = (eps_now - eps_prev) / abs(eps_prev) if eps_now is not None and eps_prev not in (None, 0) else None
-
-        book_value_per_share = N(km.get("bookValuePerShareTTM"), km.get("bookValuePerShare"), ratios.get("bookValuePerShare"), default=None)
-        if book_value_per_share is None and total_equity is not None and shares not in (None, 0):
-            book_value_per_share = total_equity / shares
-
-        _merge_nonempty(info, {
-            "totalRevenue": rev_now,
-            "netIncomeToCommon": net_income,
-            "ebitda": ebitda,
-            "trailingEps": eps_now,
-            "forwardEps": N(quote.get("epsEstimatedNextYear"), quote.get("forwardEps"), km.get("estimatedEpsAvg"), default=None),
-            "revenueGrowth": revenue_growth if revenue_growth is not None else P(growth.get("revenueGrowth"), growth.get("growthRevenue"), growth.get("growthRevenueTTM")),
-            "earningsGrowth": earnings_growth if earnings_growth is not None else P(growth.get("epsgrowth"), growth.get("epsGrowth"), growth.get("growthEPS"), growth.get("growthEPSDiluted")),
-            "totalDebt": total_debt,
-            "totalCash": total_cash,
-            "bookValue": book_value_per_share,
-            "freeCashflow": fcf,
-            "operatingCashflow": ocf,
-            "sharesOutstanding": shares,
-            "interestExpense": N(latest_income.get("interestExpense"), default=None),
-        })
-
-        # ── Margins and fallback computations ───────────────────────────
-        gross_margin = P(ratios.get("grossProfitMarginTTM"), ratios.get("grossProfitMargin"), km.get("grossProfitMarginTTM"), km.get("grossProfitMargin"))
-        op_margin = P(ratios.get("operatingProfitMarginTTM"), ratios.get("operatingProfitMargin"), km.get("operatingProfitMarginTTM"), km.get("operatingProfitMargin"))
-        net_margin = P(ratios.get("netProfitMarginTTM"), ratios.get("netProfitMargin"), km.get("netProfitMarginTTM"), km.get("netProfitMargin"))
-        ebitda_margin = P(ratios.get("ebitdaMarginTTM"), ratios.get("ebitdaMargin"), km.get("ebitdaMarginTTM"), km.get("ebitdaMargin"))
-
-        if rev_now not in (None, 0):
-            gp = N(latest_income.get("grossProfit"), default=None)
-            oi = N(latest_income.get("operatingIncome"), default=None)
-            if gross_margin is None and gp is not None:
-                gross_margin = gp / rev_now
-            if op_margin is None and oi is not None:
-                op_margin = oi / rev_now
-            if net_margin is None and net_income is not None:
-                net_margin = net_income / rev_now
-            if ebitda_margin is None and ebitda is not None:
-                ebitda_margin = ebitda / rev_now
-
-        if info.get("returnOnEquity") is None and net_income is not None and total_equity not in (None, 0):
-            info["returnOnEquity"] = net_income / total_equity
-        if info.get("returnOnAssets") is None and net_income is not None and total_assets not in (None, 0):
-            info["returnOnAssets"] = net_income / total_assets
-        if info.get("currentRatio") is None and current_assets is not None and current_liabilities not in (None, 0):
-            info["currentRatio"] = current_assets / current_liabilities
-        if info.get("quickRatio") is None and current_liabilities not in (None, 0):
-            cash = N(latest_balance.get("cashAndCashEquivalents"), default=0) or 0
-            sti = N(latest_balance.get("shortTermInvestments"), default=0) or 0
-            ar = N(latest_balance.get("netReceivables"), latest_balance.get("accountReceivables"), default=0) or 0
-            info["quickRatio"] = (cash + sti + ar) / current_liabilities
-        if info.get("debtToEquity") is None and total_debt is not None and total_equity not in (None, 0):
-            info["debtToEquity"] = (total_debt / total_equity) * 100
-
-        _merge_nonempty(info, {
-            "grossMargins": gross_margin,
-            "operatingMargins": op_margin,
-            "profitMargins": net_margin,
-            "ebitdaMargins": ebitda_margin,
-        })
-
-        # ── Shares float and short interest ─────────────────────────────
-        shares_float = merge_records([
-            ("shares-float", {"symbol": sym}, "stable"),
-            ("shares_float", {"symbol": sym}, "v4"),
-            ("shares_float", {"symbol": sym}, "v3"),
-            (f"shares_float/{sym}", {}, "v4"),
-        ])
-        float_shares = N(shares_float.get("floatShares"), shares_float.get("float"), shares_float.get("freeFloat"), shares_float.get("freeFloatShares"), default=None)
-        short_row = merge_records([
-            ("short-interest", {"symbol": sym, "limit": 4}, "stable"),
-            ("short_interest", {"symbol": sym, "limit": 4}, "v4"),
-            (f"short_interest/{sym}", {"limit": 4}, "v4"),
-        ])
-        short_pct = P(short_row.get("shortPercentOfFloat"), short_row.get("shortFloatPercent"), short_row.get("shortPercent"))
-        if short_pct is None and float_shares not in (None, 0):
-            short_interest = N(short_row.get("shortInterest"), short_row.get("shortVolume"), short_row.get("sharesShort"), default=None)
-            if short_interest is not None:
-                short_pct = short_interest / float_shares
-
-        _merge_nonempty(info, {
-            "floatShares": float_shares,
-            "shortPercentOfFloat": short_pct,
-        })
-
-        # ── Analyst targets / recommendations ──────────────────────────
-        target = merge_records([
-            ("price-target-consensus", {"symbol": sym}, "stable"),
-            (f"price-target-consensus/{sym}", {}, "v3"),
-            ("price-target-summary", {"symbol": sym}, "stable"),
-        ])
-        analyst_est = merge_records([
-            (f"analyst-estimates/{sym}", {"limit": 4}, "v3"),
-            ("analyst-estimates", {"symbol": sym, "limit": 4}, "stable"),
-        ])
-        rating = merge_records([
-            ("ratings-snapshot", {"symbol": sym}, "stable"),
-            (f"rating/{sym}", {}, "v3"),
-        ])
-        rec_rows = rows_all([
-            ("analyst-stock-recommendations", {"symbol": sym, "limit": 5}, "stable"),
-            (f"analyst-stock-recommendations/{sym}", {"limit": 5}, "v3"),
-        ])
-        rec_key, rec_mean, rec_total = None, None, None
-        if rec_rows:
-            r = rec_rows[0]
-            strong_buys = N(r.get("analystRatingsStrongBuy"), r.get("strongBuy"), default=0) or 0
-            buys = N(r.get("analystRatingsbuy"), r.get("analystRatingsBuy"), r.get("buy"), default=0) or 0
-            holds = N(r.get("analystRatingsHold"), r.get("hold"), default=0) or 0
-            sells = N(r.get("analystRatingsSell"), r.get("sell"), default=0) or 0
-            strong_sells = N(r.get("analystRatingsStrongSell"), r.get("strongSell"), default=0) or 0
-            rec_total = strong_buys + buys + holds + sells + strong_sells
-            if rec_total:
-                bullish = strong_buys + buys
-                bearish = sells + strong_sells
-                rec_key = "buy" if bullish / rec_total >= 0.55 else "sell" if bearish / rec_total >= 0.35 else "hold"
-                rec_mean = 1.8 if rec_key == "buy" else 4.0 if rec_key == "sell" else 3.0
-
-        if info.get("forwardEps") is None:
-            _merge_nonempty(info, {
-                "forwardEps": N(analyst_est.get("estimatedEpsAvg"), analyst_est.get("estimatedEpsHigh"), analyst_est.get("estimatedEpsLow"), default=None)
-            })
-
-        _merge_nonempty(info, {
-            "targetLowPrice": N(target.get("targetLow"), target.get("targetLowPrice"), target.get("priceTargetLow"), default=None),
-            "targetMeanPrice": N(target.get("targetConsensus"), target.get("targetMeanPrice"), target.get("priceTargetAverage"), target.get("targetPrice"), default=None),
-            "targetHighPrice": N(target.get("targetHigh"), target.get("targetHighPrice"), target.get("priceTargetHigh"), default=None),
-            "numberOfAnalystOpinions": N(target.get("numberOfAnalysts"), target.get("analystCount"), rec_total, default=None),
-            "recommendationKey": rec_key or T(rating.get("ratingRecommendation"), rating.get("rating"), rating.get("recommendation"), default=""),
-            "recommendationMean": rec_mean or N(rating.get("ratingScore"), rating.get("ratingDetailsDCFScore"), default=None),
-        })
-
-        # Final fallback computations that help old model calculations.
-        if info.get("sharesOutstanding") is None and market_cap not in (None, 0) and price not in (None, 0):
-            info["sharesOutstanding"] = market_cap / price
-        if info.get("priceToSalesTrailing12Months") is None and market_cap not in (None, 0) and info.get("totalRevenue") not in (None, 0):
-            info["priceToSalesTrailing12Months"] = market_cap / info["totalRevenue"]
-        if info.get("trailingPE") is None and price not in (None, 0) and info.get("trailingEps") not in (None, 0):
-            info["trailingPE"] = price / info["trailingEps"]
-        if info.get("priceToBook") is None and price not in (None, 0) and info.get("bookValue") not in (None, 0):
-            info["priceToBook"] = price / info["bookValue"]
-
-        info.setdefault("shortName", sym)
-        info.setdefault("longName", info.get("shortName", sym))
-        return info
-
-    except Exception as e:
-        _remember_fmp_error(f"FMP info builder failed for {sym}: {e}")
-        info.setdefault("shortName", sym)
-        info.setdefault("longName", info.get("shortName", sym))
-        return info
-
-
-def _fmp_repair_ui_fields(info, ticker, hist=None):
-    """Repair final Yahoo-style fields that the old UI expects."""
+def _merge_fast_info(info, fast_info, hist=None, ticker=""):
+    """Fill common UI keys from yfinance fast_info/history when full info is incomplete."""
     info = dict(info or {})
-    sym = _fmp_symbol(ticker)
+    fast_info = dict(fast_info or {})
 
-    def n(*vals, default=None):
-        return _num(*vals, default=default)
+    def first(*keys, default=None):
+        for k in keys:
+            try:
+                v = fast_info.get(k)
+                if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                    return v
+            except Exception:
+                pass
+        return default
 
-    def pct(*vals):
-        for v in vals:
-            x = _pct_to_decimal(v)
-            if x is not None:
-                return x
-        return None
+    if ticker and not info.get("symbol"):
+        info["symbol"] = ticker.upper()
+    if ticker and not info.get("shortName"):
+        info["shortName"] = ticker.upper()
+    if ticker and not info.get("longName"):
+        info["longName"] = info.get("shortName", ticker.upper())
 
-    def one(endpoint, params=None, base="v3"):
+    info.setdefault("regularMarketPrice", first("last_price", "lastPrice"))
+    info.setdefault("previousClose", first("previous_close", "previousClose"))
+    info.setdefault("marketCap", first("market_cap", "marketCap"))
+    info.setdefault("currency", first("currency"))
+    info.setdefault("sharesOutstanding", first("shares", "sharesOutstanding"))
+    info.setdefault("fiftyTwoWeekHigh", first("year_high", "yearHigh"))
+    info.setdefault("fiftyTwoWeekLow", first("year_low", "yearLow"))
+    info.setdefault("dayHigh", first("day_high", "dayHigh"))
+    info.setdefault("dayLow", first("day_low", "dayLow"))
+    info.setdefault("open", first("open"))
+
+    if hist is not None and not getattr(hist, "empty", True):
         try:
-            rs = _records(_fmp_get(endpoint, params or {}, base=base))
-            return rs[0] if rs else {}
-        except Exception:
-            return {}
-
-    def set_missing(k, *vals, pctval=False):
-        if info.get(k) not in (None, "", 0, 0.0):
-            return
-        v = pct(*vals) if pctval else n(*vals, default=None)
-        if v not in (None, ""):
-            info[k] = v
-
-    q = one(f"quote/{sym}", {}, "v3") or one("quote", {"symbol": sym}, "stable")
-    prof = one(f"profile/{sym}", {}, "v3") or one("profile", {"symbol": sym}, "stable")
-    km = one(f"key-metrics-ttm/{sym}", {}, "v3") or one("key-metrics-ttm", {"symbol": sym}, "stable")
-    rt = one(f"ratios-ttm/{sym}", {}, "v3") or one("ratios-ttm", {"symbol": sym}, "stable") or one("metrics-ratios-ttm", {"symbol": sym}, "stable")
-    inc = one(f"income-statement-ttm/{sym}", {}, "v3") or one("income-statement-ttm", {"symbol": sym}, "stable") or one(f"income-statement/{sym}", {"limit": 1}, "v3")
-    bal = one(f"balance-sheet-statement/{sym}", {"limit": 1, "period": "quarter"}, "v3") or one(f"balance-sheet-statement/{sym}", {"limit": 1}, "v3") or one("balance-sheet-statement", {"symbol": sym, "limit": 1, "period": "quarter"}, "stable")
-    cf = one(f"cash-flow-statement-ttm/{sym}", {}, "v3") or one("cash-flow-statement-ttm", {"symbol": sym}, "stable") or one(f"cash-flow-statement/{sym}", {"limit": 1}, "v3")
-    gr = one(f"financial-growth/{sym}", {"limit": 1}, "v3") or one("financial-growth", {"symbol": sym, "limit": 1}, "stable")
-
-    hi, lo = _parse_range_high_low(prof.get("range"))
-    set_missing("regularMarketPrice", q.get("price"), prof.get("price"))
-    info["currentPrice"] = info.get("currentPrice") or info.get("regularMarketPrice")
-    set_missing("marketCap", q.get("marketCap"), q.get("marketCapitalization"), prof.get("mktCap"), prof.get("marketCap"))
-    set_missing("volume", q.get("volume"), prof.get("volAvg"))
-    set_missing("averageVolume", q.get("avgVolume"), q.get("avgVolume10D"), q.get("averageVolume"), prof.get("volAvg"))
-    if info.get("averageVolume") in (None, "", 0, 0.0) and hist is not None and not getattr(hist, "empty", True) and "Volume" in hist.columns:
-        try:
-            av = pd.to_numeric(hist["Volume"], errors="coerce").dropna().tail(60).mean()
-            if np.isfinite(av) and av > 0:
-                info["averageVolume"] = float(av)
+            close = pd.to_numeric(hist.get("Close"), errors="coerce").dropna()
+            vol = pd.to_numeric(hist.get("Volume"), errors="coerce").dropna()
+            if len(close):
+                info["regularMarketPrice"] = info.get("regularMarketPrice") or float(close.iloc[-1])
+                if len(close) > 1:
+                    info["previousClose"] = info.get("previousClose") or float(close.iloc[-2])
+            if len(vol):
+                info["volume"] = info.get("volume") or int(vol.iloc[-1])
+                info["averageVolume"] = info.get("averageVolume") or int(vol.tail(min(60, len(vol))).mean())
         except Exception:
             pass
-    set_missing("beta", prof.get("beta"), q.get("beta"))
-    set_missing("fiftyTwoWeekHigh", q.get("yearHigh"), q.get("fiftyTwoWeekHigh"), prof.get("fiftyTwoWeekHigh"), hi)
-    set_missing("fiftyTwoWeekLow", q.get("yearLow"), q.get("fiftyTwoWeekLow"), prof.get("fiftyTwoWeekLow"), lo)
-    set_missing("sharesOutstanding", q.get("sharesOutstanding"), prof.get("sharesOutstanding"))
 
-    set_missing("trailingEps", q.get("eps"), inc.get("eps"), inc.get("epsTTM"), km.get("netIncomePerShareTTM"))
-    set_missing("trailingPE", q.get("pe"), q.get("peRatio"), prof.get("pe"), km.get("peRatioTTM"), rt.get("priceEarningsRatioTTM"))
-    set_missing("forwardPE", q.get("forwardPE"), km.get("forwardPERatioTTM"), km.get("priceToEarningsRatioTTM"), info.get("trailingPE"))
-    set_missing("pegRatio", km.get("pegRatioTTM"), rt.get("priceEarningsToGrowthRatioTTM"))
-    set_missing("priceToSalesTrailing12Months", km.get("priceToSalesRatioTTM"), rt.get("priceToSalesRatioTTM"))
-    set_missing("priceToBook", km.get("pbRatioTTM"), km.get("priceToBookRatioTTM"), rt.get("priceToBookRatioTTM"))
-    set_missing("enterpriseToEbitda", km.get("evToEBITDATTM"), km.get("enterpriseValueOverEBITDATTM"), rt.get("enterpriseValueMultipleTTM"))
-    set_missing("enterpriseToRevenue", km.get("evToSalesRatioTTM"))
-    set_missing("totalRevenue", inc.get("revenue"), inc.get("revenueTTM"), km.get("revenueTTM"))
-    set_missing("netIncomeToCommon", inc.get("netIncome"), inc.get("netIncomeTTM"))
-    set_missing("ebitda", inc.get("ebitda"), inc.get("ebitdaTTM"), km.get("ebitdaTTM"))
-    set_missing("grossMargins", rt.get("grossProfitMarginTTM"), km.get("grossProfitMarginTTM"), pctval=True)
-    set_missing("operatingMargins", rt.get("operatingProfitMarginTTM"), km.get("operatingProfitMarginTTM"), pctval=True)
-    set_missing("profitMargins", rt.get("netProfitMarginTTM"), km.get("netProfitMarginTTM"), pctval=True)
-    set_missing("returnOnEquity", rt.get("returnOnEquityTTM"), km.get("roeTTM"), km.get("returnOnEquityTTM"), pctval=True)
-    set_missing("returnOnAssets", rt.get("returnOnAssetsTTM"), km.get("roaTTM"), km.get("returnOnAssetsTTM"), pctval=True)
-    set_missing("currentRatio", rt.get("currentRatioTTM"), km.get("currentRatioTTM"))
-    set_missing("quickRatio", rt.get("quickRatioTTM"), km.get("quickRatioTTM"))
-    set_missing("payoutRatio", rt.get("payoutRatioTTM"), km.get("payoutRatioTTM"), pctval=True)
-    de = n(rt.get("debtEquityRatioTTM"), rt.get("debtToEquityRatioTTM"), km.get("debtToEquityTTM"), default=None)
-    if info.get("debtToEquity") in (None, "", 0, 0.0) and de is not None:
-        info["debtToEquity"] = de * 100 if abs(de) < 20 else de
-    set_missing("totalDebt", bal.get("totalDebt"), bal.get("shortTermDebt"), bal.get("longTermDebt"))
-    set_missing("totalCash", bal.get("cashAndCashEquivalents"), bal.get("cashAndShortTermInvestments"))
-    set_missing("freeCashflow", cf.get("freeCashFlow"), cf.get("freeCashFlowTTM"), km.get("freeCashFlowTTM"))
-    set_missing("operatingCashflow", cf.get("operatingCashFlow"), cf.get("netCashProvidedByOperatingActivities"))
-    set_missing("revenueGrowth", gr.get("revenueGrowth"), gr.get("growthRevenue"), pctval=True)
-    set_missing("earningsGrowth", gr.get("epsgrowth"), gr.get("epsGrowth"), gr.get("growthEPS"), pctval=True)
-
-    equity = n(bal.get("totalStockholdersEquity"), bal.get("totalShareholdersEquity"), default=None)
-    shares = n(info.get("sharesOutstanding"), q.get("sharesOutstanding"), prof.get("sharesOutstanding"), default=None)
-    if info.get("bookValue") in (None, "", 0, 0.0):
-        bvps = n(km.get("bookValuePerShareTTM"), default=None)
-        if bvps is not None:
-            info["bookValue"] = bvps
-        elif equity is not None and shares not in (None, 0):
-            info["bookValue"] = equity / shares
-
-    price = n(info.get("regularMarketPrice"), info.get("currentPrice"), default=None)
-    eps = n(info.get("trailingEps"), default=None)
-    mcap = n(info.get("marketCap"), default=None)
-    rev = n(info.get("totalRevenue"), default=None)
-    if info.get("sharesOutstanding") in (None, "", 0, 0.0) and mcap not in (None, 0) and price not in (None, 0):
-        info["sharesOutstanding"] = mcap / price
-    if info.get("trailingPE") in (None, "", 0, 0.0) and price not in (None, 0) and eps not in (None, 0):
-        info["trailingPE"] = price / eps
-    if info.get("forwardPE") in (None, "", 0, 0.0) and info.get("trailingPE") not in (None, "", 0, 0.0):
-        info["forwardPE"] = info["trailingPE"]
-    if info.get("priceToSalesTrailing12Months") in (None, "", 0, 0.0) and mcap not in (None, 0) and rev not in (None, 0):
-        info["priceToSalesTrailing12Months"] = mcap / rev
-    if info.get("pegRatio") in (None, "", 0, 0.0):
-        pe = n(info.get("trailingPE"), default=None)
-        eg = n(info.get("earningsGrowth"), default=None)
-        if pe is not None and eg not in (None, 0):
-            info["pegRatio"] = pe / (eg * 100 if abs(eg) < 3 else eg)
     return info
 
 
-def _fmp_news_items(ticker="", limit=50):
-    params = {"limit": int(limit)}
-    if ticker:
-        params["tickers"] = _fmp_symbol(ticker)
-    data = _fmp_get("stock_news", params, base="v3")
-    if not data:
-        data = _fmp_get("news/stock", {"symbols": _fmp_symbol(ticker), "limit": int(limit)} if ticker else {"limit": int(limit)}, base="stable")
-    rows = []
-    for item in _records(data):
-        rows.append({
-            "ticker": ticker or clean_text(item.get("symbol") or item.get("symbols") or ""),
-            "title": clean_text(item.get("title", "")),
-            "summary": clean_text(item.get("text") or item.get("summary") or item.get("site") or ""),
-            "publisher": clean_text(item.get("site") or item.get("publisher") or "FMP"),
-            "link": clean_text(item.get("url") or item.get("link") or ""),
-            "ts": _news_timestamp(item.get("publishedDate") or item.get("date")),
-            "source_rank": 1,
-        })
-    return rows
-
-
-class _FMPTicker:
-    """Small yfinance-like wrapper backed entirely by FMP."""
-    def __init__(self, symbol):
-        self.symbol = str(symbol or "").upper().strip()
-
-    @property
-    def info(self):
-        return self.get_info()
-
-    def get_info(self):
-        base = _fmp_build_info(self.symbol) or {"symbol": self.symbol, "shortName": self.symbol, "longName": self.symbol}
-        return _fmp_repair_ui_fields(base, self.symbol, None)
-
-    def history(self, period="1y", interval="1d", auto_adjust=True, prepost=False, **kwargs):
-        del auto_adjust, prepost, kwargs
-        if str(interval).lower() in {"1d", "5d", "1wk", "1mo", "3mo"}:
-            return _fmp_build_hist(self.symbol, period=period)
-        return _fmp_build_intraday(self.symbol, period=period, interval=interval)
-
-    @property
-    def news(self):
-        return _fmp_news_items(self.symbol, limit=50)
-
-    @property
-    def quarterly_financials(self):
-        return _fmp_statement_df("income-statement", self.symbol, limit=8, period="quarter")
-
-    @property
-    def financials(self):
-        return _fmp_statement_df("income-statement", self.symbol, limit=8, period="annual")
-
-    @property
-    def quarterly_balance_sheet(self):
-        return _fmp_statement_df("balance-sheet-statement", self.symbol, limit=8, period="quarter")
-
-    @property
-    def balance_sheet(self):
-        return _fmp_statement_df("balance-sheet-statement", self.symbol, limit=8, period="annual")
-
-    @property
-    def quarterly_cashflow(self):
-        return _fmp_statement_df("cash-flow-statement", self.symbol, limit=8, period="quarter")
-
-    @property
-    def cashflow(self):
-        return _fmp_statement_df("cash-flow-statement", self.symbol, limit=8, period="annual")
-
-
 def _fetch_stock_uncached(ticker, period="2y"):
+    """Fetch stock data using yfinance only. No FMP key or API calls are required."""
+    ticker = str(ticker or "").strip().upper()
+    if not ticker:
+        return None, "Please enter a ticker symbol."
     try:
-        if not _get_fmp_key():
-            return None, "FMP_API_KEY is missing. Add it to Streamlit Secrets, then reboot the app."
+        tk = _yf_ticker(ticker)
+        hist = _yf_history_safe(tk, retries=4, period=period, auto_adjust=True)
+        hist = _normalize_yf_history(hist)
 
-        hist = _fmp_build_hist(ticker, period)
+        # Fallback to yf.download if Ticker.history gets throttled or returns empty.
         if hist.empty:
-            last_err = ""
             try:
-                last_err = st.session_state.get("_last_fmp_error", "")
+                dl = yf.download(ticker, period=period, auto_adjust=True, progress=False, threads=False)
+                hist = _normalize_yf_history(dl)
             except Exception:
-                pass
-            detail = f" Last FMP message: {last_err}" if last_err else ""
-            return None, f"No FMP price history returned for '{ticker}'. Check your FMP key/plan or endpoint access.{detail}"
+                hist = pd.DataFrame()
 
-        info = _fmp_build_info(ticker)
-        if not info:
-            info = {"symbol": _fmp_symbol(ticker), "shortName": _fmp_symbol(ticker), "longName": _fmp_symbol(ticker)}
-        info = _fmp_repair_ui_fields(info, ticker, hist)
+        if hist.empty:
+            return None, f"Ticker '{ticker}' returned no Yahoo Finance price history. Check the symbol or try again later."
+
+        info = _yf_get_info_safe(tk)
+        fast = _yf_fast_info_safe(tk)
+        info = _merge_fast_info(info, fast, hist=hist, ticker=ticker)
+
         return {"info": info, "hist": hist}, None
     except Exception as e:
         return None, str(e)
@@ -1602,14 +735,25 @@ def fetch_stock(ticker, period="2y"):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_chart_history(ticker, period="1y", interval="1d", prepost=False):
-    del prepost
+    """Fetch chart data from yfinance for all chart windows, including intraday."""
+    ticker = str(ticker or "").strip().upper()
     try:
-        h = _fmp_build_hist(ticker, period) if str(interval).lower() in ("1d", "5d", "1wk", "1mo", "3mo") else _fmp_build_intraday(ticker, period=period, interval=interval)
-        if h is not None and not h.empty:
+        h = _yf_ticker(ticker).history(period=period, interval=interval, auto_adjust=True, prepost=prepost)
+        h = _normalize_yf_history(h)
+        if not h.empty:
+            return h, None
+    except Exception:
+        pass
+
+    try:
+        h = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False, threads=False, prepost=prepost)
+        h = _normalize_yf_history(h)
+        if not h.empty:
             return h, None
     except Exception as e:
         return None, str(e)
-    return None, "No FMP chart history returned. Check your FMP plan, ticker, or interval."
+
+    return None, "No Yahoo Finance chart history returned."
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1617,10 +761,16 @@ def fetch_peers(tickers: tuple, period="1y"):
     out = {}
     for t in tickers:
         try:
-            s = _fmp_ticker(t)
-            h = s.history(period=period, auto_adjust=True)
+            sym = str(t or "").strip().upper()
+            if not sym:
+                continue
+            s = _yf_ticker(sym)
+            h = _normalize_yf_history(_yf_history_safe(s, retries=3, period=period, auto_adjust=True))
+            if h.empty:
+                h = _normalize_yf_history(yf.download(sym, period=period, auto_adjust=True, progress=False, threads=False))
             if not h.empty:
-                out[t] = {"info": s.info, "hist": h}
+                info = _merge_fast_info(_yf_get_info_safe(s), _yf_fast_info_safe(s), hist=h, ticker=sym)
+                out[sym] = {"info": info, "hist": h}
         except Exception:
             pass
     return out
@@ -1628,13 +778,23 @@ def fetch_peers(tickers: tuple, period="1y"):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_spy(period="2y"):
-    return _fmp_ticker("SPY").history(period=period, auto_adjust=True)
+    try:
+        h = _normalize_yf_history(_yf_ticker("SPY").history(period=period, auto_adjust=True))
+        if not h.empty:
+            return h
+    except Exception:
+        pass
+    try:
+        return _normalize_yf_history(yf.download("SPY", period=period, auto_adjust=True, progress=False, threads=False))
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_financial_reports(ticker):
+    """Fetch financial statements from yfinance only."""
     try:
-        tk = _fmp_ticker(ticker)
+        tk = _yf_ticker(str(ticker or "").strip().upper())
         return {
             "Quarterly Income Statement": tk.quarterly_financials,
             "Annual Income Statement": tk.financials,
@@ -1649,40 +809,67 @@ def fetch_financial_reports(ticker):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def search_companies_by_keyword(keyword, max_results=12):
+    """Search Yahoo Finance by company name/keyword and rank results by market cap."""
     keyword = clean_text(keyword or "").strip() if "clean_text" in globals() else str(keyword or "").strip()
     if len(keyword) < 2:
         return []
+
     rows = []
+
+    def add_quote(q):
+        if not isinstance(q, dict):
+            return
+        symbol = str(q.get("symbol") or q.get("ticker") or "").strip().upper()
+        if not symbol:
+            return
+        quote_type = str(q.get("quoteType") or q.get("typeDisp") or "").upper()
+        if symbol.startswith("^") or "=F" in symbol or quote_type in {"INDEX", "FUTURE", "CURRENCY", "CRYPTOCURRENCY", "OPTION"}:
+            return
+        name = str(q.get("shortname") or q.get("longname") or q.get("shortName") or q.get("longName") or q.get("name") or symbol).strip()
+        exchange = str(q.get("exchDisp") or q.get("exchange") or q.get("fullExchangeName") or "").strip()
+        market_cap = safe_float(q.get("marketCap") or q.get("market_cap") or 0, 0)
+        rows.append({"Ticker": symbol, "Company": name, "Exchange": exchange, "Market Cap": market_cap, "Quote Type": quote_type or "EQUITY"})
+
     try:
-        data = _fmp_get("search", {"query": keyword, "limit": max_results * 3}, base="v3")
-        if not data:
-            data = _fmp_get("search-symbol", {"query": keyword, "limit": max_results * 3}, base="stable")
-        for q in _records(data):
-            symbol = str(q.get("symbol") or "").upper().strip()
-            if not symbol or symbol.startswith("^"):
-                continue
-            name = _text(q.get("name"), q.get("companyName"), symbol)
-            exch = _text(q.get("exchangeShortName"), q.get("stockExchange"), q.get("exchange"), default="FMP")
-            # Keep company search lightweight: do not call the full fundamentals
-            # builder for every keystroke/result. The selected ticker is fetched
-            # fully only after the user clicks "Use selected company".
-            rows.append({
-                "Ticker": symbol,
-                "Company": name,
-                "Exchange": exch,
-                "Market Cap": safe_float(q.get("marketCap") or q.get("mktCap") or 0, 0) if "safe_float" in globals() else _num(q.get("marketCap"), q.get("mktCap"), default=0),
-                "Quote Type": "EQUITY",
-            })
+        search_obj = yf.Search(keyword, max_results=max_results * 2)
+        for q in getattr(search_obj, "quotes", []) or []:
+            add_quote(q)
     except Exception:
         pass
+
+    if not rows:
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 StockAnalyzer/1.0"}
+            params = {"q": keyword, "quotesCount": max_results * 2, "newsCount": 0, "enableFuzzyQuery": "true", "quotesQueryId": "tss_match_phrase_query"}
+            r = requests.get("https://query1.finance.yahoo.com/v1/finance/search", params=params, headers=headers, timeout=6)
+            if r.ok:
+                for q in (r.json().get("quotes") or []):
+                    add_quote(q)
+        except Exception:
+            pass
 
     by_symbol = {}
     for row in rows:
         sym = row["Ticker"]
         if sym not in by_symbol or row.get("Market Cap", 0) > by_symbol[sym].get("Market Cap", 0):
             by_symbol[sym] = row
-    rows = sorted(by_symbol.values(), key=lambda x: (safe_float(x.get("Market Cap", 0), 0), x.get("Company", "")), reverse=True)
+    rows = list(by_symbol.values())[:max_results * 2]
+
+    for row in rows[:max_results]:
+        if row.get("Market Cap", 0) > 0 and row.get("Company") and row.get("Company") != row.get("Ticker"):
+            continue
+        try:
+            tk = _yf_ticker(row["Ticker"])
+            info = _merge_fast_info(_yf_get_info_safe(tk), _yf_fast_info_safe(tk), ticker=row["Ticker"])
+            row["Market Cap"] = safe_float(info.get("marketCap"), row.get("Market Cap", 0))
+            row["Company"] = str(info.get("shortName") or info.get("longName") or row.get("Company") or row["Ticker"])
+            row["Exchange"] = str(info.get("exchange") or info.get("fullExchangeName") or row.get("Exchange") or "")
+        except Exception:
+            pass
+
+    rows = sorted(rows, key=lambda x: (safe_float(x.get("Market Cap"), 0), x.get("Company", "")), reverse=True)
     return rows[:max_results]
+
 def _format_market_cap_short(value):
     value = safe_float(value, 0)
     if value >= 1e12:
@@ -1696,7 +883,7 @@ def _format_market_cap_short(value):
 
 def _company_search_label(row):
     cap = _format_market_cap_short(row.get("Market Cap"))
-    exch = row.get("Exchange") or "FMP"
+    exch = row.get("Exchange") or "Yahoo"
     return f"{row.get('Ticker','')} · {row.get('Company','')} · {exch} · {cap}"
 
 
@@ -1982,7 +1169,7 @@ def calc_risk(hist, spy):
     """Risk metrics using date-aligned daily returns.
 
     Notes:
-    - Uses adjusted close from FMP histories.
+    - Uses adjusted close from yfinance histories.
     - Aligns stock and SPY returns by timestamp before beta/alpha/R² calculations.
     - Annualization uses 252 trading days, which is standard for U.S. equities.
     """
@@ -2563,7 +1750,7 @@ def _extract_yf_news_item(item, ticker):
     summary = clean_text((content.get("summary") if isinstance(content, dict) else "") or (content.get("description") if isinstance(content, dict) else "") or (item.get("summary", "") if isinstance(item, dict) else ""))
     provider = content.get("provider") if isinstance(content, dict) else None
     publisher = provider.get("displayName", "") if isinstance(provider, dict) else ""
-    publisher = clean_text(publisher or (content.get("publisher") if isinstance(content, dict) else "") or (item.get("publisher", "FMP") if isinstance(item, dict) else "FMP"))
+    publisher = clean_text(publisher or (content.get("publisher") if isinstance(content, dict) else "") or (item.get("publisher", "Yahoo Finance") if isinstance(item, dict) else "Yahoo Finance"))
     link = ""
     if isinstance(content, dict) and isinstance(content.get("clickThroughUrl"), dict):
         link = content.get("clickThroughUrl", {}).get("url", "")
@@ -2576,7 +1763,7 @@ def _extract_yf_news_item(item, ticker):
     if not ts_val and isinstance(item, dict):
         ts_val = item.get("providerPublishTime")
     ts = _news_timestamp(ts_val)
-    return {"ticker": ticker, "title": title, "summary": summary, "publisher": publisher or "FMP", "link": link, "ts": ts, "source_rank": 1}
+    return {"ticker": ticker, "title": title, "summary": summary, "publisher": publisher or "Yahoo Finance", "link": link, "ts": ts, "source_rank": 1}
 
 
 def sentiment_and_impact(title, summary, ticker=""):
@@ -2711,7 +1898,7 @@ def fetch_news_items(ticker, keyword="", refresh_token=0):
     del refresh_token
     items = []
     try:
-        yf_news = _fmp_ticker(ticker).news or []
+        yf_news = _yf_ticker(ticker).news or []
         for raw in yf_news[:35]:
             n = _extract_yf_news_item(raw, ticker)
             if n["title"]:
@@ -2828,7 +2015,7 @@ MARKET_NEWS_INDUSTRIES = [
     "Autos", "Healthcare", "Biotech", "Utilities", "Real Estate", "Materials", "Crypto",
 ]
 MARKET_SOURCE_RANK = {
-    "FMP": 1, "WSJ": 1, "Wall Street Journal": 1,
+    "Yahoo Finance": 1, "WSJ": 1, "Wall Street Journal": 1,
     "Reuters": 2, "Associated Press": 2, "AP": 2, "CNBC": 2, "Bloomberg": 2, "MarketWatch": 2,
     "Financial Times": 3, "Barron's": 3, "Investing.com": 4, "Google News": 5,
 }
@@ -3015,7 +2202,7 @@ def fetch_market_news(keyword="", ticker_query="", refresh_token=0):
     ticker_company = ""
     if ticker_query:
         try:
-            tinfo = _fmp_ticker(ticker_query).get_info()
+            tinfo = _yf_ticker(ticker_query).get_info()
             ticker_company = clean_text(tinfo.get("shortName") or tinfo.get("longName") or "")
         except Exception:
             ticker_company = ""
@@ -3026,10 +2213,10 @@ def fetch_market_news(keyword="", ticker_query="", refresh_token=0):
         market_symbols.insert(0, ticker_query)
     for symbol in market_symbols:
         try:
-            for raw in (_fmp_ticker(symbol).news or [])[:12]:
+            for raw in (_yf_ticker(symbol).news or [])[:12]:
                 n = _extract_yf_news_item(raw, symbol)
                 if n.get("title"):
-                    n["publisher"] = n.get("publisher") or "FMP"
+                    n["publisher"] = n.get("publisher") or "Yahoo Finance"
                     n["source_rank"] = 1
                     items.append(n)
         except Exception:
@@ -3681,7 +2868,7 @@ def fetch_market_regime_for_investor(refresh_token=0):
     rows = {}
     for sym in symbols:
         try:
-            h = _fmp_ticker(sym).history(period="1y", auto_adjust=True)
+            h = _yf_ticker(sym).history(period="1y", auto_adjust=True)
             if h is None or h.empty or "Close" not in h:
                 continue
             close = h["Close"].dropna()
@@ -3724,7 +2911,7 @@ def fetch_investor_universe_data(tickers_tuple, refresh_token=0):
         if str(t).upper() in {"CASH", "CASH / T-BILLS"}:
             continue
         try:
-            tk = _fmp_ticker(t)
+            tk = _yf_ticker(t)
             info = tk.info or {}
             hist = tk.history(period="1y", auto_adjust=True)
             if hist is None or hist.empty or "Close" not in hist:
@@ -4465,7 +3652,6 @@ def render_investor_card(name, profile, regime, port):
 #  BACKTEST ENGINE — ENHANCED
 # ══════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_investor_backtest_prices(tickers_tuple, period="1y", refresh_token=0):
     """Fetch adjusted historical prices for Investor View backtests."""
     frames = []
@@ -4487,7 +3673,7 @@ def fetch_investor_backtest_prices(tickers_tuple, period="1y", refresh_token=0):
         if not t or t in {"CASH", "CASH / T-BILLS", "CASH / T-BILLS (3M)"}:
             continue
         try:
-            h = _fmp_ticker(t).history(period=yf_period, auto_adjust=True)
+            h = _yf_ticker(t).history(period=yf_period, auto_adjust=True)
             if h is None or h.empty or "Close" not in h.columns:
                 continue
             close = pd.to_numeric(h["Close"], errors="coerce").dropna().rename(t)
@@ -4525,7 +3711,7 @@ def _fetch_spy_benchmark(period="1y", refresh_token=0):
         else:
             yf_p = period
             cutoff = None
-        h = _fmp_ticker("SPY").history(period=yf_p, auto_adjust=True)
+        h = _yf_ticker("SPY").history(period=yf_p, auto_adjust=True)
         if h is None or h.empty or "Close" not in h.columns:
             return pd.Series(dtype=float)
         close = pd.to_numeric(h["Close"], errors="coerce").dropna()
@@ -5122,7 +4308,7 @@ def render_investor_backtest_panel(primary_name, primary_port, stance, max_holdi
 
     metrics_df = investor_backtest_metrics_table(results)
     if metrics_df.empty:
-        st.info("Backtest data could not be built from FMP. Try a longer window or another investor profile.")
+        st.info("Backtest data could not be built from Yahoo Finance. Try a longer window or another investor profile.")
         return
 
     # ── Quick-glance KPI row ─────────────────────────────────────
@@ -5274,7 +4460,7 @@ def render_investor_view():
     render_investor_card(investor_name, profile, regime, port)
 
     if port.empty:
-        st.info("Investor model could not fetch enough data from FMP. Try Update or choose a different profile.")
+        st.info("Investor model could not fetch enough data from Yahoo Finance. Try Update or choose a different profile.")
         return
 
     if not port.empty:
@@ -5362,14 +4548,14 @@ def render_investor_view():
     <div class="investor-note"><b>{tr('Current market view')}:</b> {html.escape(market_view)}</div>
     <div class="investor-note"><b>{tr('What this investor may like now')}:</b> {html.escape(likes)}.</div>
     <div class="investor-note"><b>{tr('What this investor may avoid now')}:</b> {html.escape(avoids)}.</div>
-    <div class="investor-note"><b>Scoring model transparency:</b> Factor scores (Value, Quality, Growth, Momentum, Stability) are computed from live FMP fundamentals. The final Investor Score blends the investor-style factor weights ({model_blend}%) with a generic quant multi-factor model ({100-model_blend}%), then adds market-regime overlay and news shock adjustment. Position weights use a score-power law with {('concentrated' if 'concentrated' in profile.get('concentration','').lower() else 'diversified')} style — capped at {'35%' if 'concentrated' in profile.get('concentration','').lower() else '25%'} per holding.</div>
+    <div class="investor-note"><b>Scoring model transparency:</b> Factor scores (Value, Quality, Growth, Momentum, Stability) are computed from live Yahoo Finance fundamentals. The final Investor Score blends the investor-style factor weights ({model_blend}%) with a generic quant multi-factor model ({100-model_blend}%), then adds market-regime overlay and news shock adjustment. Position weights use a score-power law with {('concentrated' if 'concentrated' in profile.get('concentration','').lower() else 'diversified')} style — capped at {'35%' if 'concentrated' in profile.get('concentration','').lower() else '25%'} per holding.</div>
     """, unsafe_allow_html=True)
 
     page_comment("Model disclaimer", [
         "<b>Simulation only:</b> this does not claim to know what any investor currently thinks or owns.",
         "<b>Not financial advice:</b> use as a watchlist/thesis generator, then verify fundamentals, filings, valuation, liquidity, and risk.",
         "<b>Benchmark:</b> SPY (S&P 500) is used as the reference for Alpha, Beta, R², Tracking Error, and Information Ratio.",
-        "<b>Model mechanics:</b> allocation combines investor-style factor weights, current market regime (VIX, MA signals, SPY/QQQ/IWM breadth), news shock tags, and fundamental factor scores from FMP.",
+        "<b>Model mechanics:</b> allocation combines investor-style factor weights, current market regime (VIX, MA signals, SPY/QQQ/IWM breadth), news shock tags, and fundamental factor scores from Yahoo Finance.",
     ])
 
 # ══════════════════════════════════════════════════════════════════
@@ -5469,7 +4655,7 @@ def build_statement_comparison(stmt, rows, quarterly=True):
     if stmt is None or stmt.empty:
         return pd.DataFrame()
     df = stmt.copy()
-    # FMP statements are converted to rows=items, columns=periods. Keep newest columns first.
+    # yfinance statements are rows=items, columns=periods. Keep newest columns first.
     try:
         df = df.loc[:, sorted(df.columns, reverse=True)]
     except Exception:
@@ -5506,7 +4692,7 @@ def render_financial_statement_table(title, stmt, rows, quarterly=True, expanded
     with st.expander(title, expanded=expanded):
         table = build_statement_comparison(stmt, rows, quarterly=quarterly)
         if table.empty:
-            st.info("Financial statement data is unavailable for this ticker from FMP.")
+            st.info("Financial statement data is unavailable for this ticker from Yahoo Finance.")
             return
         st.dataframe(table, use_container_width=True, hide_index=True)
         if quarterly:
@@ -5697,7 +4883,7 @@ def ranking_snapshot(tickers_tuple, period="3mo"):
     rows=[]
     for t in tickers_tuple:
         try:
-            y=_fmp_ticker(t); h=y.history(period=period, auto_adjust=True)
+            y=_yf_ticker(t); h=y.history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h)<2: continue
             close=h["Close"].dropna(); last=float(close.iloc[-1]); prev=float(close.iloc[-2])
             chg=last-prev; pct=chg/prev*100 if prev else 0.0
@@ -5740,12 +4926,12 @@ def ai_score_universe(tickers_tuple, period="1y", model="risk_loving"):
     """Score a universe with the same built-in AI thesis model, grouped by reported industry."""
     rows = []
     try:
-        spy_hist = _fmp_ticker("SPY").history(period=period, auto_adjust=True)
+        spy_hist = _yf_ticker("SPY").history(period=period, auto_adjust=True)
     except Exception:
         spy_hist = pd.DataFrame()
     for t in tickers_tuple:
         try:
-            y = _fmp_ticker(t)
+            y = _yf_ticker(t)
             h = y.history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h) < 35:
                 continue
@@ -5800,7 +4986,7 @@ def index_snapshot(period="1mo"):
     for order, meta in enumerate(GLOBAL_INDEXES):
         name, sym = meta["Index"], meta["Ticker"]
         try:
-            h = _fmp_ticker(sym).history(period=period, auto_adjust=True)
+            h = _yf_ticker(sym).history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h) < 2:
                 continue
             close = h["Close"].dropna()
@@ -5836,7 +5022,7 @@ def commodity_snapshot(period="3mo"):
     for meta in COMMODITIES:
         name, sym = meta["Commodity"], meta["Ticker"]
         try:
-            h = _fmp_ticker(sym).history(period=period, auto_adjust=True)
+            h = _yf_ticker(sym).history(period=period, auto_adjust=True)
             if h is None or h.empty or len(h) < 2:
                 continue
             close = h["Close"].dropna()
@@ -6005,7 +5191,7 @@ def main():
             placeholder="apple, microsoft, nvidia, service now…",
             label_visibility="collapsed",
             key="company_search_query",
-            help="Search by company name or keyword. Results are ordered by market cap when FMP provides market cap.",
+            help="Search by company name or keyword. Results are ordered by market cap when Yahoo provides/enriches market cap.",
         ).strip()
         if company_query:
             search_rows = search_companies_by_keyword(company_query, max_results=12)
@@ -6059,7 +5245,7 @@ def main():
         show_ext_hours = st.checkbox(
             tr("Show pre-market / after-hours curve"),
             value=False,
-            help="Only affects intraday windows. It includes extended-hours bars when FMP provides them."
+            help="Only affects intraday windows. It includes extended-hours bars when Yahoo Finance provides them."
         )
         chart_is_intraday = is_intraday_interval(chart_cfg["interval"])
         st.session_state["chart_is_intraday"] = chart_is_intraday
@@ -6072,7 +5258,7 @@ def main():
                     'letter-spacing:0.1em;margin-bottom:8px">Auto Refresh</div>',
                     unsafe_allow_html=True)
         auto_refresh = st.checkbox("Enable auto-refresh", value=False,
-                                   help="Automatically reload data while the app is open. Faster intervals may hit FMP API limits.")
+                                   help="Automatically reload data while the app is open. Faster intervals may hit Yahoo Finance rate limits.")
         refresh_map = {"15 seconds": 15, "30 seconds": 30, "1 minute": 60, "5 minutes": 300}
         refresh_label = st.selectbox("Refresh speed", list(refresh_map.keys()), index=1,
                                      label_visibility="collapsed", disabled=not auto_refresh)
@@ -6084,14 +5270,11 @@ def main():
             try:
                 from streamlit_autorefresh import st_autorefresh
                 refresh_count = st_autorefresh(interval=refresh_seconds * 1000, key="data_auto_refresh")
-                # Do not clear the entire cache on every scheduled rerun.
-                # Clearing all cached data caused repeated FMP/RSS refetches and
-                # quickly triggered slow loads or API limits. Cached data will
-                # update by TTL or by explicit Update buttons.
+                # Force new market/news data on scheduled reruns instead of serving stale cache.
                 if refresh_count != st.session_state.get("_last_auto_refresh_count", -1):
                     st.session_state["_last_auto_refresh_count"] = refresh_count
-                    st.session_state["_soft_refresh_count"] = refresh_count
-                st.caption(f"Auto-refreshing every {refresh_seconds}s · cached API calls are reused · refresh #{refresh_count}")
+                    st.cache_data.clear()
+                st.caption(f"Auto-refreshing every {refresh_seconds}s · refresh #{refresh_count}")
             except Exception:
                 import streamlit.components.v1 as components
                 components.html(
@@ -6147,7 +5330,7 @@ def main():
                 st.rerun()
         with st.expander("Data / disclaimer", expanded=False):
             st.markdown('<div style="font-size:10px;color:#334155;line-height:1.7">'
-                        'Price data: FMP API<br>Indicators: ta library<br>'
+                        'Price data: Yahoo Finance<br>Indicators: ta library<br>'
                         'AI Thesis: built-in rule engine<br>⚠️ Not financial advice.</div>',
                         unsafe_allow_html=True)
 
@@ -6161,35 +5344,19 @@ def main():
         st.error(f"**{ticker}**: {err or 'Not found'}"); return
 
     info = data["info"]; hist = data["hist"]
+    with st.spinner("Fetching chart window…"):
+        chart_hist, chart_err = fetch_chart_history(ticker, chart_cfg["period"], chart_cfg["interval"], show_ext_hours)
+        if chart_err or chart_hist is None or chart_hist.empty:
+            chart_hist = hist
+            st.warning(f"Recent chart data was unavailable, so the chart fell back to {period_label}: {chart_err}")
+        elif chart_is_intraday and not show_ext_hours:
+            chart_hist = regular_session_only(chart_hist)
 
-    # Lazily compute expensive sections. Previously every rerun fetched the
-    # chart window and SPY risk analytics even when the user was on Valuation,
-    # News, Rankings, or other pages that did not need them.
-    active_section_hint = st.session_state.get("section_nav", "overview")
-    chart_hist = hist
-    chart_ta = pd.DataFrame()
-    hist_ta = pd.DataFrame()
-
-    if active_section_hint == "overview":
-        with st.spinner("Fetching chart window…"):
-            chart_hist, chart_err = fetch_chart_history(ticker, chart_cfg["period"], chart_cfg["interval"], show_ext_hours)
-            if chart_err or chart_hist is None or chart_hist.empty:
-                chart_hist = hist
-                st.warning(f"Recent chart data was unavailable, so the chart fell back to {period_label}: {chart_err}")
-            elif chart_is_intraday and not show_ext_hours:
-                chart_hist = regular_session_only(chart_hist)
-        with st.spinner("Calculating chart indicators…"):
-            chart_ta = calc_ta(chart_hist)
-
-    if active_section_hint == "ai_thesis":
-        with st.spinner("Calculating thesis indicators…"):
-            hist_ta = calc_ta(hist)
-
-    risk = calc_risk(hist, None)
-    if active_section_hint in {"risk", "industry", "ai_thesis"}:
-        with st.spinner("Running risk analytics vs S&P 500…"):
-            spy = fetch_spy(period)
-            risk = calc_risk(hist, spy)
+    with st.spinner("Calculating indicators…"):
+        hist_ta = calc_ta(hist)
+        chart_ta = calc_ta(chart_hist)
+    with st.spinner("Running risk analytics vs S&P 500…"):
+        spy  = fetch_spy(period); risk = calc_risk(hist, spy)
 
     # ── Header ─────────────────────────────────────────────────────
     name    = info.get("longName", ticker)
@@ -6198,8 +5365,7 @@ def main():
     chg     = price-prev; chg_pct = chg/prev*100
     chg_clr = GREEN if chg>=0 else RED; sign = "+" if chg>=0 else ""
 
-    last_index = chart_ta.index[-1] if isinstance(chart_ta, pd.DataFrame) and not chart_ta.empty else hist.index[-1]
-    last_stamp = last_index.strftime('%b %d, %Y %H:%M') if hasattr(last_index, 'strftime') else datetime.now().strftime('%b %d, %Y')
+    last_stamp = chart_ta.index[-1].strftime('%b %d, %Y %H:%M') if hasattr(chart_ta.index[-1], 'strftime') else datetime.now().strftime('%b %d, %Y')
     st.markdown(f"""
     <div class="top-header">
       <div>
@@ -6215,7 +5381,7 @@ def main():
         <div class="top-header-price-main">${price:,.2f}</div>
         <div style="font-size:1.05rem;font-weight:600;color:{chg_clr};font-family:monospace;margin-top:6px;white-space:nowrap">
           {sign}{chg:.2f} &nbsp; ({sign}{chg_pct:.2f}%)</div>
-        <div style="font-size:11px;color:#334155;margin-top:5px;white-space:nowrap">{last_stamp} · FMP API</div>
+        <div style="font-size:11px;color:#334155;margin-top:5px;white-space:nowrap">{last_stamp} · Yahoo Finance</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -6464,7 +5630,7 @@ def main():
         q6.metric("Rev Growth",   with_avg(fpct(info.get("revenueGrowth")), "rev_growth", info))
 
         shead("Financial Reports")
-        st.caption("Access the three major statements directly inside valuation. Comparisons use the newest available FMP statement data.")
+        st.caption("Access the three major statements directly inside valuation. Comparisons use the newest available Yahoo Finance statement data.")
         stmt_mode = st.radio("Statement period", ["Quarterly", "Annual"], horizontal=True, index=0, key="financial_statement_mode")
         with st.spinner(f"Loading {ticker} financial reports..."):
             reports, reports_err = fetch_financial_reports(ticker)
@@ -6812,7 +5978,7 @@ def main():
             st.session_state.news_refresh_token = int(time.time())
             fetch_news_items.clear()
 
-        st.caption(tr("Priority: FMP first, then WSJ/RSS and broad financial news. Duplicate/overlapping headlines are filtered."))
+        st.caption(tr("Priority: Yahoo Finance/yfinance first, then WSJ/RSS and broad financial news. Duplicate/overlapping headlines are filtered."))
         with st.spinner(f"Updating latest news for {ticker}..."):
             news_items = fetch_news_items(ticker, news_keyword, st.session_state.news_refresh_token)
         if news_order == tr("Newest first") or news_order == "Newest first":
@@ -6840,7 +6006,7 @@ def main():
     # ══════════ TAB 8 — BROAD MARKET NEWS ════════════════════════
     if active_tab == "market_news":
         shead("Latest Market News")
-        st.caption(tr("Market news by importance/time with AI-style impact analysis. Sources prioritize FMP and WSJ first, then reliable broad RSS discovery."))
+        st.caption(tr("Market news by importance/time with AI-style impact analysis. Sources prioritize yfinance/Yahoo Finance and WSJ first, then reliable broad RSS discovery."))
         if "market_news_refresh_token" not in st.session_state:
             st.session_state.market_news_refresh_token = 0
 
@@ -6948,12 +6114,12 @@ def main():
                 shead(f"{direction_label} {metric} Ranking Table")
                 display_cols = ["Ticker", "Company", "Country", "Sector", "Market Cap $B", "Last Price", "Change %", "5D Momentum %", "Opening Gap %", "20D Vol %", "Volume Ratio", "Dollar Volume $M", "Liquidity Score", "Trader Composite Score", "Investment Note"]
                 table_df = top_df[[c for c in display_cols if c in top_df.columns]].copy()
-                table_df["FMP Link"] = table_df["Ticker"].apply(lambda x: f"https://financialmodelingprep.com/financial-summary/{x}")
+                table_df["Yahoo Link"] = table_df["Ticker"].apply(lambda x: f"https://finance.yahoo.com/quote/{x}")
                 st.dataframe(
                     table_df,
                     use_container_width=True,
                     hide_index=True,
-                    column_config={"FMP Link": st.column_config.LinkColumn("FMP", display_text="Open")},
+                    column_config={"Yahoo Link": st.column_config.LinkColumn("Yahoo", display_text="Open")},
                 )
                 st.markdown("<div style='font-size:11px;color:#64748b;margin:8px 0'>Click a U.S.-listed ticker bar to open that company in the main Overview.</div>", unsafe_allow_html=True)
                 ca, cb = st.columns(2)
