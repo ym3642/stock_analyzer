@@ -878,150 +878,317 @@ def _fmp_statement_df(endpoint, ticker, limit=8, period=None):
     return out
 
 
+
 def _fmp_build_info(ticker):
     """Build a Yahoo-compatible info dict from FMP.
 
-    The rest of the app expects yfinance-style keys. This function is the adapter:
-    it fetches from several FMP endpoints, then maps FMP names into the exact
-    keys used by Overview, Valuation, Risk, DCF, Industry, and AI Thesis.
+    This is the main data adapter for the app. The UI and models were originally
+    built around yfinance's ``Ticker.info`` keys, so this function intentionally
+    returns those same key names while sourcing data only from FMP.
+
+    Important design choice:
+    FMP's stable, legacy v3, annual, quarterly, and TTM endpoints can each return
+    different subsets depending on plan and endpoint availability. We therefore
+    merge all usable records instead of stopping at the first successful response.
     """
     sym = _fmp_symbol(ticker)
     info = {"symbol": sym, "quoteType": "EQUITY"}
 
+    def N(*vals, default=None):
+        return _num(*vals, default=default)
+
+    def T(*vals, default=""):
+        return _text(*vals, default=default)
+
+    def P(*vals):
+        for v in vals:
+            x = _pct_to_decimal(v)
+            if x is not None:
+                return x
+        return None
+
+    def rows_all(attempts):
+        """Return a concatenated list of records from every successful attempt."""
+        out = []
+        seen = set()
+        for endpoint, params, base in attempts:
+            try:
+                data = _fmp_get(endpoint, params=params or {}, base=base)
+                for row in _records(data):
+                    key = (endpoint, base, str(row.get("date", "")), str(row.get("calendarYear", "")), str(row.get("symbol", "")))
+                    # Do not over-dedupe: same date from stable/v3 may contain different columns.
+                    if key in seen and len(row) < 5:
+                        continue
+                    seen.add(key)
+                    out.append(row)
+            except Exception:
+                continue
+        return out
+
+    def merge_records(attempts, prefer="later"):
+        """Merge multiple endpoint records into one dict, keeping non-empty values."""
+        merged = {}
+        records = rows_all(attempts)
+        if prefer == "earlier":
+            records = list(reversed(records))
+        for row in records:
+            for k, v in (row or {}).items():
+                if v is None or v == "" or str(v).lower() in {"nan", "none", "null"}:
+                    continue
+                # Keep existing good nonzero value against a weaker zero value.
+                if k in merged and merged[k] not in (None, "", 0, 0.0) and v in (0, 0.0, "0", "0.0"):
+                    continue
+                merged[k] = v
+        return merged
+
+    def first_rows(endpoint, limit=8, period=None):
+        return _fmp_statement_rows(endpoint, sym, limit=limit, period=period)
+
     try:
-        # --- Profile / quote / market-cap core ---------------------------------
-        profile = _first(_fmp_get("profile", {"symbol": sym}, base="stable"))
-        if not profile:
-            profile = _first(_fmp_get(f"profile/{sym}", base="v3"))
-
-        quote = _first(_fmp_get("quote", {"symbol": sym}, base="stable"))
-        if not quote:
-            quote = _first(_fmp_get(f"quote/{sym}", base="v3"))
-
-        market_cap_record = _first(_fmp_get("market-capitalization", {"symbol": sym}, base="stable"))
-        if not market_cap_record:
-            market_cap_record = _first(_fmp_get(f"market-capitalization/{sym}", base="v3"))
+        # ── Profile / quote / market data ───────────────────────────────
+        profile = merge_records([
+            ("profile", {"symbol": sym}, "stable"),
+            (f"profile/{sym}", {}, "v3"),
+            ("company/profile", {"symbol": sym}, "v3"),
+        ])
+        quote = merge_records([
+            (f"quote/{sym}", {}, "v3"),
+            ("quote", {"symbol": sym}, "stable"),
+            ("quote-short", {"symbol": sym}, "stable"),
+            (f"quote-short/{sym}", {}, "v3"),
+        ])
+        market_cap_row = merge_records([
+            ("market-capitalization", {"symbol": sym}, "stable"),
+            (f"market-capitalization/{sym}", {}, "v3"),
+            ("market-capitalization-batch", {"symbols": sym}, "stable"),
+        ])
+        ev = merge_records([
+            (f"enterprise-values/{sym}", {"limit": 4}, "v3"),
+            ("enterprise-values", {"symbol": sym, "limit": 4}, "stable"),
+        ])
 
         hi_from_range, lo_from_range = _parse_range_high_low(profile.get("range"))
-        price = _num(quote.get("price"), quote.get("currentPrice"), profile.get("price"), default=None)
-        market_cap = _num(
-            quote.get("marketCap"), profile.get("mktCap"), profile.get("marketCap"),
-            market_cap_record.get("marketCap"), market_cap_record.get("marketCapTTM"), default=None
+        price = N(
+            quote.get("price"), quote.get("currentPrice"), quote.get("lastSalePrice"),
+            profile.get("price"), quote.get("previousClose"), quote.get("close"),
+            default=None
+        )
+        market_cap = N(
+            quote.get("marketCap"), quote.get("marketCapitalization"),
+            profile.get("mktCap"), profile.get("marketCap"),
+            market_cap_row.get("marketCap"), market_cap_row.get("marketCapTTM"),
+            ev.get("marketCapitalization"), ev.get("marketCap"),
+            default=None
         )
 
         _merge_nonempty(info, {
-            "shortName": _text(profile.get("companyName"), profile.get("companyNameTTM"), profile.get("name"), quote.get("name"), sym),
-            "longName": _text(profile.get("companyName"), profile.get("name"), quote.get("name"), sym),
-            "symbol": _text(profile.get("symbol"), quote.get("symbol"), sym),
-            "sector": _text(profile.get("sector"), default=""),
-            "industry": _text(profile.get("industry"), default=""),
-            "country": _text(profile.get("country"), default=""),
-            "website": _text(profile.get("website"), default=""),
-            "longBusinessSummary": _text(profile.get("description"), profile.get("companyDescription"), default=""),
-            "fullTimeEmployees": _num(profile.get("fullTimeEmployees"), profile.get("employees"), default=None),
-            "exchange": _text(profile.get("exchangeShortName"), profile.get("exchange"), quote.get("exchange"), default=""),
-            "currency": _text(profile.get("currency"), quote.get("currency"), default="USD"),
-            "ceo": _text(profile.get("ceo"), default=""),
-            "logo_url": _text(profile.get("image"), default=""),
+            "shortName": T(profile.get("companyName"), profile.get("name"), quote.get("name"), sym),
+            "longName": T(profile.get("companyName"), profile.get("name"), quote.get("name"), sym),
+            "symbol": T(profile.get("symbol"), quote.get("symbol"), sym),
+            "sector": T(profile.get("sector"), quote.get("sector"), default=""),
+            "industry": T(profile.get("industry"), quote.get("industry"), default=""),
+            "country": T(profile.get("country"), default=""),
+            "website": T(profile.get("website"), default=""),
+            "longBusinessSummary": T(profile.get("description"), profile.get("companyDescription"), default=""),
+            "fullTimeEmployees": N(profile.get("fullTimeEmployees"), profile.get("employees"), default=None),
+            "exchange": T(profile.get("exchangeShortName"), profile.get("exchange"), quote.get("exchange"), quote.get("exchangeShortName"), default=""),
+            "currency": T(profile.get("currency"), quote.get("currency"), default="USD"),
+            "ceo": T(profile.get("ceo"), default=""),
+            "logo_url": T(profile.get("image"), default=""),
             "regularMarketPrice": price,
             "currentPrice": price,
-            "previousClose": _num(quote.get("previousClose"), quote.get("priceAvg50"), default=None),
-            "open": _num(quote.get("open"), default=None),
-            "dayHigh": _num(quote.get("dayHigh"), quote.get("high"), default=None),
-            "dayLow": _num(quote.get("dayLow"), quote.get("low"), default=None),
+            "previousClose": N(quote.get("previousClose"), quote.get("previous_close"), default=None),
+            "open": N(quote.get("open"), default=None),
+            "dayHigh": N(quote.get("dayHigh"), quote.get("high"), default=None),
+            "dayLow": N(quote.get("dayLow"), quote.get("low"), default=None),
             "marketCap": market_cap,
-            "volume": _num(quote.get("volume"), profile.get("volAvg"), default=None),
-            "averageVolume": _num(quote.get("avgVolume"), profile.get("volAvg"), quote.get("avgVolume10D"), default=None),
-            "beta": _num(profile.get("beta"), default=None),
-            "fiftyTwoWeekHigh": _num(quote.get("yearHigh"), quote.get("fiftyTwoWeekHigh"), profile.get("fiftyTwoWeekHigh"), hi_from_range, default=None),
-            "fiftyTwoWeekLow": _num(quote.get("yearLow"), quote.get("fiftyTwoWeekLow"), profile.get("fiftyTwoWeekLow"), lo_from_range, default=None),
-            "trailingPE": _num(quote.get("pe"), quote.get("peRatio"), profile.get("pe"), default=None),
-            "trailingEps": _num(quote.get("eps"), profile.get("eps"), default=None),
-            "sharesOutstanding": _num(quote.get("sharesOutstanding"), profile.get("sharesOutstanding"), default=None),
-            "floatShares": _num(profile.get("floatShares"), profile.get("float"), default=None),
-            "dividendYield": _pct_to_decimal(profile.get("lastDiv")) if price in (None, 0) else None,
+            "volume": N(quote.get("volume"), profile.get("volAvg"), default=None),
+            "averageVolume": N(quote.get("avgVolume"), quote.get("avgVolume10D"), profile.get("volAvg"), default=None),
+            "beta": N(profile.get("beta"), quote.get("beta"), default=None),
+            "fiftyTwoWeekHigh": N(quote.get("yearHigh"), quote.get("fiftyTwoWeekHigh"), profile.get("fiftyTwoWeekHigh"), hi_from_range, default=None),
+            "fiftyTwoWeekLow": N(quote.get("yearLow"), quote.get("fiftyTwoWeekLow"), profile.get("fiftyTwoWeekLow"), lo_from_range, default=None),
+            "trailingPE": N(quote.get("pe"), quote.get("peRatio"), profile.get("pe"), default=None),
+            "trailingEps": N(quote.get("eps"), quote.get("epsTTM"), profile.get("eps"), default=None),
         })
-        if profile.get("lastDiv") is not None and price not in (None, 0):
-            info["dividendYield"] = _num(profile.get("lastDiv"), default=0) / price
+        last_div = N(profile.get("lastDiv"), quote.get("lastDiv"), default=None)
+        if last_div is not None and price not in (None, 0):
+            info["dividendYield"] = last_div / price
 
-        # --- Key metrics / ratios / enterprise value ----------------------------
-        key_metrics = _first(_fmp_get("key-metrics-ttm", {"symbol": sym}, base="stable"))
-        if not key_metrics:
-            key_metrics = _first(_fmp_get(f"key-metrics-ttm/{sym}", base="v3"))
+        # ── Ratios / key metrics / estimates ────────────────────────────
+        km = merge_records([
+            (f"key-metrics-ttm/{sym}", {}, "v3"),
+            ("key-metrics-ttm", {"symbol": sym}, "stable"),
+            (f"key-metrics/{sym}", {"limit": 4}, "v3"),
+            ("key-metrics", {"symbol": sym, "limit": 4}, "stable"),
+        ])
+        ratios = merge_records([
+            (f"ratios-ttm/{sym}", {}, "v3"),
+            ("ratios-ttm", {"symbol": sym}, "stable"),
+            ("metrics-ratios-ttm", {"symbol": sym}, "stable"),
+            (f"ratios/{sym}", {"limit": 4}, "v3"),
+            ("ratios", {"symbol": sym, "limit": 4}, "stable"),
+            ("metrics-ratios", {"symbol": sym, "limit": 4}, "stable"),
+        ])
+        growth = merge_records([
+            (f"financial-growth/{sym}", {"limit": 4}, "v3"),
+            ("financial-growth", {"symbol": sym, "limit": 4}, "stable"),
+            ("income-statement-growth", {"symbol": sym, "limit": 4}, "stable"),
+            (f"income-statement-growth/{sym}", {"limit": 4}, "v3"),
+        ])
 
-        ratios = _first(_fmp_get("ratios-ttm", {"symbol": sym}, base="stable"))
-        if not ratios:
-            ratios = _first(_fmp_get(f"ratios-ttm/{sym}", base="v3"))
-
-        ev_row = _first(_fmp_get("enterprise-values", {"symbol": sym, "limit": 1}, base="stable"))
-        if not ev_row:
-            ev_row = _first(_fmp_get(f"enterprise-values/{sym}", {"limit": 1}, base="v3"))
+        pe = N(km.get("peRatioTTM"), ratios.get("priceEarningsRatioTTM"), km.get("peRatio"), ratios.get("priceEarningsRatio"), info.get("trailingPE"), default=None)
+        fpe = N(km.get("priceToEarningsRatioTTM"), km.get("forwardPE"), quote.get("forwardPE"), pe, default=None)
+        ps = N(km.get("priceToSalesRatioTTM"), ratios.get("priceToSalesRatioTTM"), km.get("priceToSalesRatio"), ratios.get("priceToSalesRatio"), default=None)
+        pb = N(km.get("pbRatioTTM"), km.get("priceToBookRatioTTM"), ratios.get("priceToBookRatioTTM"), km.get("pbRatio"), km.get("priceToBookRatio"), ratios.get("priceBookValueRatio"), default=None)
+        peg = N(km.get("pegRatioTTM"), km.get("pegRatio"), ratios.get("priceEarningsToGrowthRatioTTM"), ratios.get("pegRatio"), default=None)
+        ev_to_ebitda = N(km.get("evToEBITDATTM"), km.get("enterpriseValueOverEBITDATTM"), km.get("enterpriseValueOverEBITDA"), ratios.get("enterpriseValueMultipleTTM"), default=None)
+        ev_to_rev = N(km.get("evToSalesRatioTTM"), km.get("evToSalesRatio"), km.get("enterpriseValueOverRevenue"), default=None)
 
         _merge_nonempty(info, {
-            "trailingPE": _num(key_metrics.get("peRatioTTM"), ratios.get("priceEarningsRatioTTM"), quote.get("pe"), info.get("trailingPE"), default=None),
-            "forwardPE": _num(key_metrics.get("priceToEarningsRatioTTM"), key_metrics.get("peRatioTTM"), ratios.get("priceEarningsRatioTTM"), default=None),
-            "priceToSalesTrailing12Months": _num(key_metrics.get("priceToSalesRatioTTM"), ratios.get("priceToSalesRatioTTM"), default=None),
-            "priceToBook": _num(key_metrics.get("pbRatioTTM"), key_metrics.get("priceToBookRatioTTM"), ratios.get("priceToBookRatioTTM"), default=None),
-            "pegRatio": _num(key_metrics.get("pegRatioTTM"), ratios.get("priceEarningsToGrowthRatioTTM"), default=None),
-            "enterpriseToEbitda": _num(key_metrics.get("evToEBITDATTM"), key_metrics.get("enterpriseValueOverEBITDATTM"), default=None),
-            "enterpriseToRevenue": _num(key_metrics.get("evToSalesRatioTTM"), key_metrics.get("evToSalesRatioTTM"), default=None),
-            "returnOnEquity": _pct_to_decimal(key_metrics.get("roeTTM")) if key_metrics.get("roeTTM") is not None else _pct_to_decimal(ratios.get("returnOnEquityTTM")),
-            "returnOnAssets": _pct_to_decimal(key_metrics.get("roaTTM")) if key_metrics.get("roaTTM") is not None else _pct_to_decimal(ratios.get("returnOnAssetsTTM")),
-            "debtToEquity": _num(key_metrics.get("debtToEquityTTM"), ratios.get("debtEquityRatioTTM"), ratios.get("debtToEquityRatioTTM"), default=None),
-            "currentRatio": _num(key_metrics.get("currentRatioTTM"), ratios.get("currentRatioTTM"), default=None),
-            "quickRatio": _num(key_metrics.get("quickRatioTTM"), ratios.get("quickRatioTTM"), default=None),
-            "dividendYield": _pct_to_decimal(key_metrics.get("dividendYieldTTM")) if key_metrics.get("dividendYieldTTM") is not None else info.get("dividendYield"),
-            "payoutRatio": _pct_to_decimal(key_metrics.get("payoutRatioTTM")) if key_metrics.get("payoutRatioTTM") is not None else _pct_to_decimal(ratios.get("payoutRatioTTM")),
+            "trailingPE": pe,
+            "forwardPE": fpe,
+            "priceToSalesTrailing12Months": ps,
+            "priceToBook": pb,
+            "pegRatio": peg,
+            "enterpriseToEbitda": ev_to_ebitda,
+            "enterpriseToRevenue": ev_to_rev,
+            "returnOnEquity": P(km.get("roeTTM"), km.get("returnOnEquityTTM"), km.get("roe"), ratios.get("returnOnEquityTTM"), ratios.get("returnOnEquity")),
+            "returnOnAssets": P(km.get("roaTTM"), km.get("returnOnAssetsTTM"), km.get("roa"), ratios.get("returnOnAssetsTTM"), ratios.get("returnOnAssets")),
+            "currentRatio": N(km.get("currentRatioTTM"), km.get("currentRatio"), ratios.get("currentRatioTTM"), ratios.get("currentRatio"), default=None),
+            "quickRatio": N(km.get("quickRatioTTM"), km.get("quickRatio"), ratios.get("quickRatioTTM"), ratios.get("quickRatio"), default=None),
+            "payoutRatio": P(km.get("payoutRatioTTM"), km.get("payoutRatio"), ratios.get("payoutRatioTTM"), ratios.get("payoutRatio")),
+            "dividendYield": P(km.get("dividendYieldTTM"), km.get("dividendYield"), ratios.get("dividendYieldTTM"), info.get("dividendYield")),
         })
 
-        # --- Statements: revenue, net income, EBITDA, debt, cash, FCF ------------
-        income_rows = _fmp_statement_rows("income-statement", sym, limit=4)
-        latest_income = income_rows[0] if income_rows else {}
-        prev_income = income_rows[1] if len(income_rows) > 1 else {}
-        rev_now = _num(latest_income.get("revenue"), default=None)
-        rev_prev = _num(prev_income.get("revenue"), default=None)
-        eps_now = _num(latest_income.get("eps"), latest_income.get("epsdiluted"), info.get("trailingEps"), default=None)
-        eps_prev = _num(prev_income.get("eps"), prev_income.get("epsdiluted"), default=None)
+        debt_equity_raw = N(km.get("debtToEquityTTM"), km.get("debtToEquity"), ratios.get("debtEquityRatioTTM"), ratios.get("debtToEquityRatioTTM"), ratios.get("debtEquityRatio"), ratios.get("debtToEquityRatio"), default=None)
+        if debt_equity_raw is not None:
+            info["debtToEquity"] = debt_equity_raw * 100 if abs(debt_equity_raw) < 20 else debt_equity_raw
+
+        # ── Financial statements: TTM + latest annual + latest quarterly ─
+        income_ttm = merge_records([
+            (f"income-statement-ttm/{sym}", {}, "v3"),
+            ("income-statement-ttm", {"symbol": sym}, "stable"),
+        ])
+        balance_ttm = merge_records([
+            (f"balance-sheet-statement-ttm/{sym}", {}, "v3"),
+            ("balance-sheet-statement-ttm", {"symbol": sym}, "stable"),
+        ])
+        cash_ttm = merge_records([
+            (f"cash-flow-statement-ttm/{sym}", {}, "v3"),
+            ("cash-flow-statement-ttm", {"symbol": sym}, "stable"),
+        ])
+
+        income_annual = first_rows("income-statement", limit=6, period="annual")
+        income_quarter = first_rows("income-statement", limit=8, period="quarter")
+        balance_annual = first_rows("balance-sheet-statement", limit=6, period="annual")
+        balance_quarter = first_rows("balance-sheet-statement", limit=8, period="quarter")
+        cash_annual = first_rows("cash-flow-statement", limit=6, period="annual")
+        cash_quarter = first_rows("cash-flow-statement", limit=8, period="quarter")
+
+        # Prefer TTM for flow items, otherwise annual, otherwise latest quarter.
+        latest_income = {}
+        for row in ([income_quarter[0]] if income_quarter else []) + ([income_annual[0]] if income_annual else []) + ([income_ttm] if income_ttm else []):
+            _merge_nonempty(latest_income, row)
+        # For balance sheet, latest quarter is usually more current than annual/TTM.
+        latest_balance = {}
+        for row in ([balance_annual[0]] if balance_annual else []) + ([balance_ttm] if balance_ttm else []) + ([balance_quarter[0]] if balance_quarter else []):
+            _merge_nonempty(latest_balance, row)
+        latest_cash = {}
+        for row in ([cash_quarter[0]] if cash_quarter else []) + ([cash_annual[0]] if cash_annual else []) + ([cash_ttm] if cash_ttm else []):
+            _merge_nonempty(latest_cash, row)
+
+        prev_income = income_annual[1] if len(income_annual) > 1 else (income_quarter[4] if len(income_quarter) > 4 else income_quarter[1] if len(income_quarter) > 1 else {})
+
+        shares = N(
+            quote.get("sharesOutstanding"), profile.get("sharesOutstanding"),
+            ev.get("numberOfShares"), ev.get("sharesNumber"),
+            km.get("weightedAverageShsOutTTM"), latest_income.get("weightedAverageShsOut"),
+            latest_income.get("weightedAverageShsOutDil"), market_cap and price and market_cap / price,
+            default=None
+        )
+        rev_now = N(latest_income.get("revenue"), latest_income.get("revenueTTM"), km.get("revenueTTM"), (km.get("revenuePerShareTTM") * shares if N(km.get("revenuePerShareTTM"), default=None) is not None and shares else None), default=None)
+        rev_prev = N(prev_income.get("revenue"), default=None)
+        eps_now = N(latest_income.get("eps"), latest_income.get("epsTTM"), latest_income.get("epsdiluted"), latest_income.get("epsDiluted"), km.get("netIncomePerShareTTM"), info.get("trailingEps"), default=None)
+        eps_prev = N(prev_income.get("eps"), prev_income.get("epsdiluted"), prev_income.get("epsDiluted"), default=None)
+        net_income = N(latest_income.get("netIncome"), latest_income.get("netIncomeTTM"), latest_income.get("netIncomeCommonStockholders"), latest_income.get("netIncomeAvailableToCommonShareholders"), default=None)
+        ebitda = N(latest_income.get("ebitda"), latest_income.get("ebitdaTTM"), km.get("ebitdaTTM"), default=None)
+        if ebitda is None:
+            oi = N(latest_income.get("operatingIncome"), default=None)
+            da = N(latest_income.get("depreciationAndAmortization"), latest_cash.get("depreciationAndAmortization"), default=None)
+            if oi is not None and da is not None:
+                ebitda = oi + da
+
+        std = N(latest_balance.get("shortTermDebt"), latest_balance.get("shortTermBorrowings"), default=0) or 0
+        ltd = N(latest_balance.get("longTermDebt"), latest_balance.get("longTermDebtNoncurrent"), default=0) or 0
+        total_debt = N(latest_balance.get("totalDebt"), latest_balance.get("totalDebtTTM"), std + ltd if (std or ltd) else None, default=None)
+        total_cash = N(latest_balance.get("cashAndCashEquivalents"), latest_balance.get("cashAndShortTermInvestments"), latest_balance.get("cashCashEquivalentsAndShortTermInvestments"), default=None)
+        total_equity = N(latest_balance.get("totalStockholdersEquity"), latest_balance.get("totalShareholdersEquity"), latest_balance.get("totalEquity"), default=None)
+        total_assets = N(latest_balance.get("totalAssets"), default=None)
+        current_assets = N(latest_balance.get("totalCurrentAssets"), default=None)
+        current_liabilities = N(latest_balance.get("totalCurrentLiabilities"), default=None)
+
+        ocf = N(latest_cash.get("operatingCashFlow"), latest_cash.get("netCashProvidedByOperatingActivities"), latest_cash.get("netCashProvidedByOperatingActivitiesTTM"), default=None)
+        capex = N(latest_cash.get("capitalExpenditure"), latest_cash.get("capitalExpenditures"), latest_cash.get("capitalExpenditureTTM"), default=None)
+        fcf = N(latest_cash.get("freeCashFlow"), latest_cash.get("freeCashFlowTTM"), km.get("freeCashFlowTTM"), default=None)
+        if fcf is None and ocf is not None and capex is not None:
+            fcf = ocf + capex
+
         revenue_growth = (rev_now - rev_prev) / abs(rev_prev) if rev_now is not None and rev_prev not in (None, 0) else None
         earnings_growth = (eps_now - eps_prev) / abs(eps_prev) if eps_now is not None and eps_prev not in (None, 0) else None
 
-        balance_rows = _fmp_statement_rows("balance-sheet-statement", sym, limit=2)
-        latest_balance = balance_rows[0] if balance_rows else {}
-
-        cash_rows = _fmp_statement_rows("cash-flow-statement", sym, limit=2)
-        latest_cash = cash_rows[0] if cash_rows else {}
-
-        # Some FMP plans expose growth separately; use it if statement-derived growth is missing.
-        growth = _first(_fmp_get("financial-growth", {"symbol": sym, "limit": 1}, base="stable"))
-        if not growth:
-            growth = _first(_fmp_get(f"financial-growth/{sym}", {"limit": 1}, base="v3"))
+        book_value_per_share = N(km.get("bookValuePerShareTTM"), km.get("bookValuePerShare"), ratios.get("bookValuePerShare"), default=None)
+        if book_value_per_share is None and total_equity is not None and shares not in (None, 0):
+            book_value_per_share = total_equity / shares
 
         _merge_nonempty(info, {
             "totalRevenue": rev_now,
-            "netIncomeToCommon": _num(latest_income.get("netIncome"), latest_income.get("netIncomeCommonStockholders"), default=None),
-            "ebitda": _num(latest_income.get("ebitda"), default=None),
-            "revenueGrowth": revenue_growth if revenue_growth is not None else _pct_to_decimal(growth.get("revenueGrowth")),
-            "earningsGrowth": earnings_growth if earnings_growth is not None else _pct_to_decimal(growth.get("epsgrowth"),),
+            "netIncomeToCommon": net_income,
+            "ebitda": ebitda,
             "trailingEps": eps_now,
-            "forwardEps": _num(latest_income.get("epsdiluted"), eps_now, default=None),
-            "totalDebt": _num(latest_balance.get("totalDebt"), latest_balance.get("shortTermDebt"), default=None),
-            "totalCash": _num(latest_balance.get("cashAndCashEquivalents"), latest_balance.get("cashAndShortTermInvestments"), default=None),
-            "bookValue": _num(latest_balance.get("totalStockholdersEquity"), latest_balance.get("totalEquity"), default=None),
-            "freeCashflow": _num(latest_cash.get("freeCashFlow"), default=None),
-            "operatingCashflow": _num(latest_cash.get("operatingCashFlow"), latest_cash.get("netCashProvidedByOperatingActivities"), default=None),
-            "interestExpense": _num(latest_income.get("interestExpense"), default=None),
+            "forwardEps": N(quote.get("epsEstimatedNextYear"), quote.get("forwardEps"), km.get("estimatedEpsAvg"), default=None),
+            "revenueGrowth": revenue_growth if revenue_growth is not None else P(growth.get("revenueGrowth"), growth.get("growthRevenue"), growth.get("growthRevenueTTM")),
+            "earningsGrowth": earnings_growth if earnings_growth is not None else P(growth.get("epsgrowth"), growth.get("epsGrowth"), growth.get("growthEPS"), growth.get("growthEPSDiluted")),
+            "totalDebt": total_debt,
+            "totalCash": total_cash,
+            "bookValue": book_value_per_share,
+            "freeCashflow": fcf,
+            "operatingCashflow": ocf,
+            "sharesOutstanding": shares,
+            "interestExpense": N(latest_income.get("interestExpense"), default=None),
         })
 
-        # --- Margins after revenue/EBITDA/net income are known ------------------
-        gross_margin = _pct_to_decimal(ratios.get("grossProfitMarginTTM"))
-        op_margin = _pct_to_decimal(ratios.get("operatingProfitMarginTTM")) or _pct_to_decimal(ratios.get("operatingProfitMargin"))
-        net_margin = _pct_to_decimal(ratios.get("netProfitMarginTTM"))
-        ebitda_margin = _pct_to_decimal(ratios.get("ebitdaMarginTTM"))
+        # ── Margins and fallback computations ───────────────────────────
+        gross_margin = P(ratios.get("grossProfitMarginTTM"), ratios.get("grossProfitMargin"), km.get("grossProfitMarginTTM"), km.get("grossProfitMargin"))
+        op_margin = P(ratios.get("operatingProfitMarginTTM"), ratios.get("operatingProfitMargin"), km.get("operatingProfitMarginTTM"), km.get("operatingProfitMargin"))
+        net_margin = P(ratios.get("netProfitMarginTTM"), ratios.get("netProfitMargin"), km.get("netProfitMarginTTM"), km.get("netProfitMargin"))
+        ebitda_margin = P(ratios.get("ebitdaMarginTTM"), ratios.get("ebitdaMargin"), km.get("ebitdaMarginTTM"), km.get("ebitdaMargin"))
+
         if rev_now not in (None, 0):
-            gross_margin = gross_margin if gross_margin is not None else _num(latest_income.get("grossProfit"), default=0) / rev_now
-            op_margin = op_margin if op_margin is not None else _num(latest_income.get("operatingIncome"), default=0) / rev_now
-            net_margin = net_margin if net_margin is not None else _num(latest_income.get("netIncome"), default=0) / rev_now
-            ebitda_margin = ebitda_margin if ebitda_margin is not None else _num(latest_income.get("ebitda"), default=0) / rev_now
+            gp = N(latest_income.get("grossProfit"), default=None)
+            oi = N(latest_income.get("operatingIncome"), default=None)
+            if gross_margin is None and gp is not None:
+                gross_margin = gp / rev_now
+            if op_margin is None and oi is not None:
+                op_margin = oi / rev_now
+            if net_margin is None and net_income is not None:
+                net_margin = net_income / rev_now
+            if ebitda_margin is None and ebitda is not None:
+                ebitda_margin = ebitda / rev_now
+
+        if info.get("returnOnEquity") is None and net_income is not None and total_equity not in (None, 0):
+            info["returnOnEquity"] = net_income / total_equity
+        if info.get("returnOnAssets") is None and net_income is not None and total_assets not in (None, 0):
+            info["returnOnAssets"] = net_income / total_assets
+        if info.get("currentRatio") is None and current_assets is not None and current_liabilities not in (None, 0):
+            info["currentRatio"] = current_assets / current_liabilities
+        if info.get("quickRatio") is None and current_liabilities not in (None, 0):
+            cash = N(latest_balance.get("cashAndCashEquivalents"), default=0) or 0
+            sti = N(latest_balance.get("shortTermInvestments"), default=0) or 0
+            ar = N(latest_balance.get("netReceivables"), latest_balance.get("accountReceivables"), default=0) or 0
+            info["quickRatio"] = (cash + sti + ar) / current_liabilities
+        if info.get("debtToEquity") is None and total_debt is not None and total_equity not in (None, 0):
+            info["debtToEquity"] = (total_debt / total_equity) * 100
+
         _merge_nonempty(info, {
             "grossMargins": gross_margin,
             "operatingMargins": op_margin,
@@ -1029,51 +1196,96 @@ def _fmp_build_info(ticker):
             "ebitdaMargins": ebitda_margin,
         })
 
-        # Better share count if market cap and price are available.
-        if not info.get("sharesOutstanding") and info.get("marketCap") and info.get("regularMarketPrice"):
-            info["sharesOutstanding"] = info["marketCap"] / max(info["regularMarketPrice"], 1e-9)
+        # ── Shares float and short interest ─────────────────────────────
+        shares_float = merge_records([
+            ("shares-float", {"symbol": sym}, "stable"),
+            ("shares_float", {"symbol": sym}, "v4"),
+            ("shares_float", {"symbol": sym}, "v3"),
+            (f"shares_float/{sym}", {}, "v4"),
+        ])
+        float_shares = N(shares_float.get("floatShares"), shares_float.get("float"), shares_float.get("freeFloat"), shares_float.get("freeFloatShares"), default=None)
+        short_row = merge_records([
+            ("short-interest", {"symbol": sym, "limit": 4}, "stable"),
+            ("short_interest", {"symbol": sym, "limit": 4}, "v4"),
+            (f"short_interest/{sym}", {"limit": 4}, "v4"),
+        ])
+        short_pct = P(short_row.get("shortPercentOfFloat"), short_row.get("shortFloatPercent"), short_row.get("shortPercent"))
+        if short_pct is None and float_shares not in (None, 0):
+            short_interest = N(short_row.get("shortInterest"), short_row.get("shortVolume"), short_row.get("sharesShort"), default=None)
+            if short_interest is not None:
+                short_pct = short_interest / float_shares
 
-        # --- Analyst/target fields ---------------------------------------------
-        target = _first(_fmp_get("price-target-consensus", {"symbol": sym}, base="stable"))
-        if not target:
-            target = _first(_fmp_get(f"price-target-consensus/{sym}", base="v3"))
-        rating = _first(_fmp_get("ratings-snapshot", {"symbol": sym}, base="stable"))
-        recommendations = _records(_fmp_get("analyst-stock-recommendations", {"symbol": sym, "limit": 5}, base="stable"))
-        if not recommendations:
-            recommendations = _records(_fmp_get(f"analyst-stock-recommendations/{sym}", {"limit": 5}, base="v3"))
+        _merge_nonempty(info, {
+            "floatShares": float_shares,
+            "shortPercentOfFloat": short_pct,
+        })
 
+        # ── Analyst targets / recommendations ──────────────────────────
+        target = merge_records([
+            ("price-target-consensus", {"symbol": sym}, "stable"),
+            (f"price-target-consensus/{sym}", {}, "v3"),
+            ("price-target-summary", {"symbol": sym}, "stable"),
+        ])
+        analyst_est = merge_records([
+            (f"analyst-estimates/{sym}", {"limit": 4}, "v3"),
+            ("analyst-estimates", {"symbol": sym, "limit": 4}, "stable"),
+        ])
+        rating = merge_records([
+            ("ratings-snapshot", {"symbol": sym}, "stable"),
+            (f"rating/{sym}", {}, "v3"),
+        ])
+        rec_rows = rows_all([
+            ("analyst-stock-recommendations", {"symbol": sym, "limit": 5}, "stable"),
+            (f"analyst-stock-recommendations/{sym}", {"limit": 5}, "v3"),
+        ])
         rec_key, rec_mean, rec_total = None, None, None
-        if recommendations:
-            r = recommendations[0]
-            buys = _num(r.get("analystRatingsbuy"), r.get("analystRatingsBuy"), r.get("buy"), default=0) or 0
-            holds = _num(r.get("analystRatingsHold"), r.get("hold"), default=0) or 0
-            sells = _num(r.get("analystRatingsSell"), r.get("sell"), default=0) or 0
-            strong_buys = _num(r.get("analystRatingsStrongBuy"), r.get("strongBuy"), default=0) or 0
-            strong_sells = _num(r.get("analystRatingsStrongSell"), r.get("strongSell"), default=0) or 0
-            rec_total = buys + holds + sells + strong_buys + strong_sells
-            bullish = buys + strong_buys
-            bearish = sells + strong_sells
+        if rec_rows:
+            r = rec_rows[0]
+            strong_buys = N(r.get("analystRatingsStrongBuy"), r.get("strongBuy"), default=0) or 0
+            buys = N(r.get("analystRatingsbuy"), r.get("analystRatingsBuy"), r.get("buy"), default=0) or 0
+            holds = N(r.get("analystRatingsHold"), r.get("hold"), default=0) or 0
+            sells = N(r.get("analystRatingsSell"), r.get("sell"), default=0) or 0
+            strong_sells = N(r.get("analystRatingsStrongSell"), r.get("strongSell"), default=0) or 0
+            rec_total = strong_buys + buys + holds + sells + strong_sells
             if rec_total:
+                bullish = strong_buys + buys
+                bearish = sells + strong_sells
                 rec_key = "buy" if bullish / rec_total >= 0.55 else "sell" if bearish / rec_total >= 0.35 else "hold"
                 rec_mean = 1.8 if rec_key == "buy" else 4.0 if rec_key == "sell" else 3.0
 
+        if info.get("forwardEps") is None:
+            _merge_nonempty(info, {
+                "forwardEps": N(analyst_est.get("estimatedEpsAvg"), analyst_est.get("estimatedEpsHigh"), analyst_est.get("estimatedEpsLow"), default=None)
+            })
+
         _merge_nonempty(info, {
-            "targetLowPrice": _num(target.get("targetLow"), target.get("targetLowPrice"), default=None),
-            "targetMeanPrice": _num(target.get("targetConsensus"), target.get("targetMeanPrice"), target.get("priceTargetAverage"), default=None),
-            "targetHighPrice": _num(target.get("targetHigh"), target.get("targetHighPrice"), default=None),
-            "numberOfAnalystOpinions": _num(target.get("numberOfAnalysts"), rec_total, default=None),
-            "recommendationKey": rec_key or _text(rating.get("ratingRecommendation"), rating.get("rating"), default=""),
-            "recommendationMean": rec_mean or _num(rating.get("ratingScore"), default=None),
+            "targetLowPrice": N(target.get("targetLow"), target.get("targetLowPrice"), target.get("priceTargetLow"), default=None),
+            "targetMeanPrice": N(target.get("targetConsensus"), target.get("targetMeanPrice"), target.get("priceTargetAverage"), target.get("targetPrice"), default=None),
+            "targetHighPrice": N(target.get("targetHigh"), target.get("targetHighPrice"), target.get("priceTargetHigh"), default=None),
+            "numberOfAnalystOpinions": N(target.get("numberOfAnalysts"), target.get("analystCount"), rec_total, default=None),
+            "recommendationKey": rec_key or T(rating.get("ratingRecommendation"), rating.get("rating"), rating.get("recommendation"), default=""),
+            "recommendationMean": rec_mean or N(rating.get("ratingScore"), rating.get("ratingDetailsDCFScore"), default=None),
         })
 
-        # UI safety defaults: keep keys present without hiding real missing values as strings.
+        # Final fallback computations that help old model calculations.
+        if info.get("sharesOutstanding") is None and market_cap not in (None, 0) and price not in (None, 0):
+            info["sharesOutstanding"] = market_cap / price
+        if info.get("priceToSalesTrailing12Months") is None and market_cap not in (None, 0) and info.get("totalRevenue") not in (None, 0):
+            info["priceToSalesTrailing12Months"] = market_cap / info["totalRevenue"]
+        if info.get("trailingPE") is None and price not in (None, 0) and info.get("trailingEps") not in (None, 0):
+            info["trailingPE"] = price / info["trailingEps"]
+        if info.get("priceToBook") is None and price not in (None, 0) and info.get("bookValue") not in (None, 0):
+            info["priceToBook"] = price / info["bookValue"]
+
         info.setdefault("shortName", sym)
         info.setdefault("longName", info.get("shortName", sym))
         return info
+
     except Exception as e:
         _remember_fmp_error(f"FMP info builder failed for {sym}: {e}")
-        return info if info else None
-
+        info.setdefault("shortName", sym)
+        info.setdefault("longName", info.get("shortName", sym))
+        return info
 
 def _fmp_news_items(ticker="", limit=50):
     params = {"limit": int(limit)}
