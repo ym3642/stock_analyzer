@@ -678,8 +678,10 @@ def _get_fmp_key():
 
 
 _FMP_SYMBOL_MAP = {
-    "^GSPC": "SPY", "^DJI": "DIA", "^IXIC": "QQQ", "^RUT": "IWM", "^VIX": "VIXY",
-    "CL=F": "USO", "BZ=F": "BNO", "GC=F": "GLD", "SI=F": "SLV", "HG=F": "CPER", "NG=F": "UNG",
+    # Keep external/Yahoo-style commodity and crypto tickers compatible, but map
+    # them to FMP's native symbols instead of ETF proxies. This makes the
+    # Commodities tab show the actual commodity curves when the FMP plan allows it.
+    "CL=F": "CLUSD", "BZ=F": "BZUSD", "GC=F": "GCUSD", "SI=F": "SIUSD", "HG=F": "HGUSD", "NG=F": "NGUSD",
     "BTC-USD": "BTCUSD", "ETH-USD": "ETHUSD",
 }
 
@@ -869,22 +871,52 @@ def _normalize_ohlcv(df):
     return out[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
 
 
+def _resample_ohlcv(df, rule):
+    """Resample daily OHLCV data to weekly/monthly bars for yfinance-style intervals."""
+    if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex):
+        return df
+    try:
+        out = df.resample(rule).agg({
+            "Open": "first", "High": "max", "Low": "min",
+            "Close": "last", "Volume": "sum",
+        }).dropna(subset=["Close"])
+        return out if not out.empty else df
+    except Exception:
+        return df
+
+
 def _fmp_build_hist(ticker, period="2y"):
-    """Fetch OHLCV history from FMP. Tries multiple current and legacy response shapes."""
-    sym = _fmp_symbol(ticker)
+    """Fetch daily OHLCV history from FMP across stocks, indexes, commodities, crypto, and FX."""
+    raw_symbol = str(ticker or "").upper().strip()
+    sym = _fmp_symbol(raw_symbol)
     days = _period_to_days(period, default=730)
     try:
         date_to = pd.Timestamp.today().strftime("%Y-%m-%d")
         date_from = (pd.Timestamp.today() - pd.Timedelta(days=days + 10)).strftime("%Y-%m-%d")
+        sym_path = quote_plus(sym)
 
+        # Stable EOD is the current FMP route for stocks, indexes, commodities,
+        # forex, and crypto. Legacy v3 is kept as a fallback for plans/accounts
+        # where old endpoints are still enabled.
         attempts = [
-            ("historical-price-full/" + sym, {"timeseries": days}, "v3"),
-            ("historical-price-full/" + sym, {"from": date_from, "to": date_to}, "v3"),
             ("historical-price-eod/full", {"symbol": sym, "from": date_from, "to": date_to}, "stable"),
             ("historical-price-eod/light", {"symbol": sym, "from": date_from, "to": date_to}, "stable"),
+            ("historical-price-full/" + sym_path, {"from": date_from, "to": date_to}, "v3"),
+            ("historical-price-full/" + sym_path, {"timeseries": days}, "v3"),
+        ]
+        if sym.startswith("^"):
+            attempts.extend([
+                ("historical-price-full/index/" + sym_path, {"from": date_from, "to": date_to}, "v3"),
+                ("historical-price-full/index/" + sym_path, {"timeseries": days}, "v3"),
+            ])
+
+        # Final no-date stable fallback can return the longest available series;
+        # we trim it locally to the requested period.
+        attempts.extend([
             ("historical-price-eod/full", {"symbol": sym}, "stable"),
             ("historical-price-eod/light", {"symbol": sym}, "stable"),
-        ]
+        ])
+
         for endpoint, params, base in attempts:
             data = _fmp_get(endpoint, params=params, base=base)
             rows = _records(data)
@@ -897,7 +929,9 @@ def _fmp_build_hist(ticker, period="2y"):
                 return df
 
         # Last-resort one-row quote so the UI does not fully break.
-        q = _first(_fmp_get("quote/" + sym, base="v3")) or _first(_fmp_get("quote", {"symbol": sym}, base="stable"))
+        q = (_first(_fmp_get("quote", {"symbol": sym}, base="stable"))
+             or _first(_fmp_get("quote-short", {"symbol": sym}, base="stable"))
+             or _first(_fmp_get("quote/" + sym_path, base="v3")))
         price = _num(q.get("price"), q.get("previousClose"), q.get("close"), default=None)
         if price is not None:
             idx = [pd.Timestamp.today().normalize()]
@@ -913,7 +947,6 @@ def _fmp_build_hist(ticker, period="2y"):
         _remember_fmp_error(f"FMP historical loader failed for {sym}: {e}")
         return pd.DataFrame()
 
-
 def _fmp_build_intraday(ticker, period="5d", interval="5m"):
     interval_map = {
         "1m": "1min", "2m": "1min", "5m": "5min", "15m": "15min", "30m": "30min",
@@ -922,16 +955,21 @@ def _fmp_build_intraday(ticker, period="5d", interval="5m"):
     fmp_interval = interval_map.get(str(interval).lower(), str(interval).lower())
     sym = _fmp_symbol(ticker)
     try:
-        data = _fmp_get(f"historical-chart/{fmp_interval}/{sym}", base="v3")
-        df = _normalize_ohlcv(pd.DataFrame(_records(data))) if data else pd.DataFrame()
-        if df.empty:
-            return df
-        cutoff = pd.Timestamp.today() - pd.Timedelta(days=_period_to_days(period, default=30))
-        return df[df.index >= cutoff]
+        attempts = [
+            (f"historical-chart/{fmp_interval}", {"symbol": sym}, "stable"),
+            (f"historical-chart/{fmp_interval}/{quote_plus(sym)}", {}, "v3"),
+        ]
+        for endpoint, params, base in attempts:
+            data = _fmp_get(endpoint, params=params, base=base)
+            df = _normalize_ohlcv(pd.DataFrame(_records(data))) if data else pd.DataFrame()
+            if df.empty:
+                continue
+            cutoff = pd.Timestamp.today() - pd.Timedelta(days=_period_to_days(period, default=30))
+            return df[df.index >= cutoff]
+        return pd.DataFrame()
     except Exception as e:
         _remember_fmp_error(f"FMP intraday loader failed for {sym}: {e}")
         return pd.DataFrame()
-
 
 def _fmp_statement_rows(endpoint, ticker, limit=8, period=None):
     sym = _fmp_symbol(ticker)
@@ -1535,8 +1573,16 @@ class _FMPTicker:
 
     def history(self, period="1y", interval="1d", auto_adjust=True, prepost=False, **kwargs):
         del auto_adjust, prepost, kwargs
-        if str(interval).lower() in {"1d", "5d", "1wk", "1mo", "3mo"}:
-            return _fmp_build_hist(self.symbol, period=period)
+        interval_l = str(interval).lower()
+        if interval_l in {"1d", "5d", "1wk", "1mo", "3mo"}:
+            h = _fmp_build_hist(self.symbol, period=period)
+            if interval_l == "1wk":
+                return _resample_ohlcv(h, "W-FRI")
+            if interval_l == "1mo":
+                return _resample_ohlcv(h, "ME")
+            if interval_l == "3mo":
+                return _resample_ohlcv(h, "QE")
+            return h
         return _fmp_build_intraday(self.symbol, period=period, interval=interval)
 
     @property
@@ -1604,8 +1650,15 @@ def fetch_stock(ticker, period="2y"):
 def fetch_chart_history(ticker, period="1y", interval="1d", prepost=False):
     del prepost
     try:
-        h = _fmp_build_hist(ticker, period) if str(interval).lower() in ("1d", "5d", "1wk", "1mo", "3mo") else _fmp_build_intraday(ticker, period=period, interval=interval)
+        interval_l = str(interval).lower()
+        h = _fmp_build_hist(ticker, period) if interval_l in ("1d", "5d", "1wk", "1mo", "3mo") else _fmp_build_intraday(ticker, period=period, interval=interval)
         if h is not None and not h.empty:
+            if interval_l == "1wk":
+                h = _resample_ohlcv(h, "W-FRI")
+            elif interval_l == "1mo":
+                h = _resample_ohlcv(h, "ME")
+            elif interval_l == "3mo":
+                h = _resample_ohlcv(h, "QE")
             return h, None
     except Exception as e:
         return None, str(e)
@@ -3156,7 +3209,19 @@ def render_market_news_item(n):
 
 def price_chart(df, ticker, days, active_mas, show_bb, show_vol):
     """Main OHLCV candlestick chart with optional MA, BB, volume+vol panel."""
-    dp = df.tail(days)
+    if df is None or df.empty:
+        return go.Figure()
+    required = {"Open", "High", "Low", "Close"}
+    if not required.issubset(set(df.columns)):
+        return go.Figure()
+    dp = df.tail(days).copy()
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        if col not in dp.columns:
+            dp[col] = 0 if col == "Volume" else np.nan
+        dp[col] = pd.to_numeric(dp[col], errors="coerce")
+    dp = dp.dropna(subset=["Open", "High", "Low", "Close"])
+    if dp.empty:
+        return go.Figure()
     up = dp["Close"] >= dp["Open"]
 
     rows  = 2 if show_vol else 1
@@ -5535,11 +5600,52 @@ def regular_session_only(df):
     return out if not out.empty else df
 
 
+def _figure_datetime_info(fig):
+    """Return (has_datetime_x, looks_intraday) using the figure's own x-values, not sidebar state."""
+    try:
+        if fig is None or not getattr(fig, "data", None):
+            return False, False
+        for trace in fig.data:
+            x = getattr(trace, "x", None)
+            if x is None:
+                continue
+            vals = list(x)
+            if not vals:
+                continue
+
+            # Numeric bar/histogram axes can be accidentally converted by
+            # pandas.to_datetime into 1970 timestamps. Only treat the x-axis
+            # as datetime when the original values are actually date-like.
+            sample = next((v for v in vals if v is not None and str(v) not in {"", "nan", "NaT"}), None)
+            if sample is None:
+                continue
+            is_date_like = isinstance(sample, (pd.Timestamp, datetime, np.datetime64))
+            if not is_date_like and isinstance(sample, str):
+                is_date_like = bool(re.search(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}", sample))
+            if not is_date_like:
+                continue
+
+            dt = pd.to_datetime(pd.Series(vals), errors="coerce")
+            if dt.notna().sum() == 0:
+                continue
+            valid = dt.dropna()
+            if valid.empty:
+                continue
+            intraday = bool(((valid.dt.hour != 0) | (valid.dt.minute != 0) | (valid.dt.second != 0)).any())
+            return True, intraday
+    except Exception:
+        pass
+    return False, False
+
+
 def apply_market_axis(fig):
-    """Make intraday charts skip overnight/weekend gaps when extended hours are hidden."""
-    intraday = bool(st.session_state.get("chart_is_intraday", False))
+    """Apply date-axis range breaks only to figures that actually have datetime x-values."""
+    has_dt, looks_intraday = _figure_datetime_info(fig)
+    if not has_dt:
+        return fig
+
     show_ext = bool(st.session_state.get("show_ext_hours", False))
-    if intraday and not show_ext:
+    if looks_intraday and not show_ext:
         fig.update_xaxes(
             rangebreaks=[
                 dict(bounds=["sat", "mon"]),
@@ -5548,7 +5654,7 @@ def apply_market_axis(fig):
             tickformat="%b %d<br>%I:%M %p",
             hoverformat="%b %d, %Y %I:%M %p",
         )
-    elif intraday:
+    elif looks_intraday:
         fig.update_xaxes(
             tickformat="%b %d<br>%I:%M %p",
             hoverformat="%b %d, %Y %I:%M %p",
@@ -6162,43 +6268,28 @@ def main():
 
     info = data["info"]; hist = data["hist"]
 
-    # Lazily compute expensive sections. Previously every rerun fetched the
-    # chart window and SPY risk analytics even when the user was on Valuation,
-    # News, Rankings, or other pages that did not need them.
-    active_section_hint = st.session_state.get("section_nav", "overview")
+    # Per-section data is loaded after the navigation radio below, so first-click
+    # navigation never shows empty/stale charts or indicators.
     chart_hist = hist
     chart_ta = pd.DataFrame()
     hist_ta = pd.DataFrame()
-
-    if active_section_hint == "overview":
-        with st.spinner("Fetching chart window…"):
-            chart_hist, chart_err = fetch_chart_history(ticker, chart_cfg["period"], chart_cfg["interval"], show_ext_hours)
-            if chart_err or chart_hist is None or chart_hist.empty:
-                chart_hist = hist
-                st.warning(f"Recent chart data was unavailable, so the chart fell back to {period_label}: {chart_err}")
-            elif chart_is_intraday and not show_ext_hours:
-                chart_hist = regular_session_only(chart_hist)
-        with st.spinner("Calculating chart indicators…"):
-            chart_ta = calc_ta(chart_hist)
-
-    if active_section_hint == "ai_thesis":
-        with st.spinner("Calculating thesis indicators…"):
-            hist_ta = calc_ta(hist)
-
     risk = calc_risk(hist, None)
-    if active_section_hint in {"risk", "industry", "ai_thesis"}:
-        with st.spinner("Running risk analytics vs S&P 500…"):
-            spy = fetch_spy(period)
-            risk = calc_risk(hist, spy)
 
     # ── Header ─────────────────────────────────────────────────────
-    name    = info.get("longName", ticker)
-    price   = float(info.get("currentPrice") or info.get("regularMarketPrice") or hist["Close"].iloc[-1])
-    prev    = float(info.get("previousClose") or hist["Close"].iloc[-2])
-    chg     = price-prev; chg_pct = chg/prev*100
-    chg_clr = GREEN if chg>=0 else RED; sign = "+" if chg>=0 else ""
+    name = info.get("longName", ticker)
+    hist_close = pd.to_numeric(hist.get("Close", pd.Series(dtype=float)), errors="coerce").dropna()
+    fallback_price = float(hist_close.iloc[-1]) if len(hist_close) else 0.0
+    price = float(info.get("currentPrice") or info.get("regularMarketPrice") or fallback_price)
+    prev_candidate = info.get("previousClose")
+    if prev_candidate in (None, "", 0, 0.0) and len(hist_close) >= 2:
+        prev_candidate = hist_close.iloc[-2]
+    prev = float(prev_candidate or price or 1.0)
+    chg = price - prev
+    chg_pct = (chg / prev * 100) if prev else 0.0
+    chg_clr = GREEN if chg >= 0 else RED
+    sign = "+" if chg >= 0 else ""
 
-    last_index = chart_ta.index[-1] if isinstance(chart_ta, pd.DataFrame) and not chart_ta.empty else hist.index[-1]
+    last_index = hist.index[-1] if isinstance(hist, pd.DataFrame) and not hist.empty else datetime.now()
     last_stamp = last_index.strftime('%b %d, %Y %H:%M') if hasattr(last_index, 'strftime') else datetime.now().strftime('%b %d, %Y')
     st.markdown(f"""
     <div class="top-header">
@@ -6283,6 +6374,27 @@ def main():
         format_func=lambda k: SECTION_LABELS.get(k, k),
     )
     st.markdown('</div>', unsafe_allow_html=True)
+
+    # Load the exact data needed by the selected section after active_tab is known.
+    if active_tab == "overview":
+        with st.spinner("Fetching chart window…"):
+            chart_hist, chart_err = fetch_chart_history(ticker, chart_cfg["period"], chart_cfg["interval"], show_ext_hours)
+            if chart_err or chart_hist is None or chart_hist.empty:
+                chart_hist = hist
+                st.warning(f"Recent chart data was unavailable, so the chart fell back to {period_label}: {chart_err}")
+            elif chart_is_intraday and not show_ext_hours:
+                chart_hist = regular_session_only(chart_hist)
+        with st.spinner("Calculating chart indicators…"):
+            chart_ta = calc_ta(chart_hist)
+
+    if active_tab == "ai_thesis":
+        with st.spinner("Calculating thesis indicators…"):
+            hist_ta = calc_ta(hist)
+
+    if active_tab in {"industry", "ai_thesis"}:
+        with st.spinner("Running risk analytics vs S&P 500…"):
+            spy = fetch_spy(period)
+            risk = calc_risk(hist, spy)
 
     # ══════════ SECTION 1 — OVERVIEW ═══════════════════════════════
     if active_tab == "overview":
