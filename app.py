@@ -30,7 +30,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ── FMP-only compatibility helpers ────────────────────────────────
-# All market/fundamental/news data is routed through Financial Modeling Prep.
+# Financial Modeling Prep is primary; stale local cache and optional Yahoo fallback keep the UI alive under FMP limits.
 # The compatibility _fmp_ticker() name is kept only so the rest of the app UI can stay unchanged.
 def _fmp_ticker(symbol, proxy=None):
     return _FMPTicker(symbol)
@@ -360,9 +360,10 @@ def legend_html(items):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  DATA LAYER — FMP ONLY, YFINANCE-COMPATIBLE FIELD MAP
+#  DATA LAYER — FMP PRIMARY, RESILIENT CACHE, OPTIONAL YFINANCE FALLBACK
 # ══════════════════════════════════════════════════════════════════
 import os as _os
+from pathlib import Path
 _FMP_V3_BASE = "https://financialmodelingprep.com/api/v3"
 _FMP_STABLE_BASE = "https://financialmodelingprep.com/stable"
 _FMP_BASE = _FMP_V3_BASE
@@ -384,8 +385,22 @@ def _secret_or_env_bool(name, default=False):
     return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 SMARTSTOCK_FAST_MODE = not _secret_or_env_bool("SMARTSTOCK_DEEP_FMP", default=False)
-FMP_TIMEOUT_SECONDS = float(_os.environ.get("SMARTSTOCK_FMP_TIMEOUT", "6"))
-FMP_RAW_CACHE_TTL = int(_os.environ.get("SMARTSTOCK_FMP_RAW_CACHE_TTL", "3600"))
+
+# Institutional stability defaults:
+# - Do NOT fire dozens of FMP endpoints in parallel by default.
+# - Cache raw successful responses on disk so app restarts do not immediately burn FMP quota.
+# - Use stale cached data or an optional Yahoo Finance price/info fallback when FMP is rate-limited.
+FMP_TIMEOUT_SECONDS = float(_os.environ.get("SMARTSTOCK_FMP_TIMEOUT", "8"))
+FMP_RAW_CACHE_TTL = int(_os.environ.get("SMARTSTOCK_FMP_RAW_CACHE_TTL", "21600"))          # 6h disk fresh cache
+FMP_MEMORY_CACHE_TTL = int(_os.environ.get("SMARTSTOCK_FMP_MEMORY_CACHE_TTL", "120"))      # short memory TTL so 429 errors are not sticky
+FMP_STALE_CACHE_MAX_AGE = int(_os.environ.get("SMARTSTOCK_FMP_STALE_CACHE_MAX_AGE", str(7 * 24 * 3600)))
+FMP_RATE_LIMIT_COOLDOWN = int(_os.environ.get("SMARTSTOCK_FMP_RATE_LIMIT_COOLDOWN", "900")) # 15m circuit breaker
+SMARTSTOCK_PARALLEL_WARMUP = _secret_or_env_bool("SMARTSTOCK_PARALLEL_WARMUP", default=False)
+SMARTSTOCK_MAX_WORKERS = max(1, int(_os.environ.get("SMARTSTOCK_MAX_WORKERS", "3")))
+SMARTSTOCK_ALLOW_YFINANCE_FALLBACK = _secret_or_env_bool("SMARTSTOCK_ALLOW_YFINANCE_FALLBACK", default=True)
+SMARTSTOCK_CACHE_ONLY = _secret_or_env_bool("SMARTSTOCK_CACHE_ONLY", default=False)
+SMARTSTOCK_CACHE_DIR = Path(_os.environ.get("SMARTSTOCK_CACHE_DIR", str(Path.home() / ".smartstock_cache")))
+
 # Realized risk metrics should not silently depend on a stale hard-coded
 # treasury rate. Set SMARTSTOCK_RISK_FREE_RATE=0.045 for 4.5%, etc.
 RISK_FREE_ANNUAL_RATE = float(_os.environ.get("SMARTSTOCK_RISK_FREE_RATE", "0.00"))
@@ -400,20 +415,26 @@ _WARMUP_LOCK = threading.Lock()
 
 def _fmp_warmup_parallel(endpoint_list):
     """
-    Fire every (endpoint, params, base) request in parallel.
-    Results land in _WARMUP so that the _fmp_get() calls that follow
-    immediately find their data without making a second HTTP round-trip.
-    Uses a plain thread pool — no Streamlit context required.
+    Optional pre-warm for paid/high-limit FMP plans only.
+
+    The previous version fired ~30 endpoints at once for every ticker, which is
+    exactly what caused free/low-tier FMP accounts to hit HTTP 429.  By default
+    this function is intentionally a no-op. Enable it only with:
+        SMARTSTOCK_PARALLEL_WARMUP=1
     """
+    if not SMARTSTOCK_PARALLEL_WARMUP or SMARTSTOCK_CACHE_ONLY:
+        return
+    try:
+        if _fmp_rate_limited_active():
+            return
+    except Exception:
+        pass
+
     key = _get_fmp_key()
     if not key:
         return
 
-    base_url_map = {
-        "stable": _FMP_STABLE_BASE,
-        "v4":     _FMP_V4_BASE,
-        "v3":     _FMP_V3_BASE,
-    }
+    base_url_map = {"stable": _FMP_STABLE_BASE, "v4": _FMP_V4_BASE, "v3": _FMP_V3_BASE}
 
     def _one(ep, params_items, base_str):
         wkey = (ep, params_items, base_str)
@@ -424,25 +445,26 @@ def _fmp_warmup_parallel(endpoint_list):
         p = {k: v for k, v in params_items}
         p["apikey"] = key
         try:
-            r = _http_session().get(
-                f"{base_url}/{ep.lstrip('/')}",
-                params=p,
-                timeout=FMP_TIMEOUT_SECONDS,
-            )
-            data = r.json() if r.status_code == 200 else {}
+            r = _http_session().get(f"{base_url}/{ep.lstrip('/')}", params=p, timeout=FMP_TIMEOUT_SECONDS)
+            if r.status_code == 429 or "Limit Reach" in (r.text or ""):
+                try:
+                    _mark_fmp_rate_limited(f"FMP HTTP 429 from /{ep}: {(r.text or '')[:300]}")
+                except Exception:
+                    pass
+                data = {}
+            else:
+                data = r.json() if r.status_code == 200 else {}
         except Exception:
             data = {}
         with _WARMUP_LOCK:
             _WARMUP[wkey] = data
 
     jobs = []
-    for ep, params, base in endpoint_list:
-        ep_clean = str(ep).lstrip("/")
-        pi = _params_items(params or {})
-        bs = str(base or "v3").lower()
-        jobs.append((ep_clean, pi, bs))
-
-    with ThreadPoolExecutor(max_workers=min(len(jobs), 10)) as ex:
+    for ep, params, base in endpoint_list or []:
+        jobs.append((str(ep).lstrip("/"), _params_items(params or {}), str(base or "v3").lower()))
+    if not jobs:
+        return
+    with ThreadPoolExecutor(max_workers=min(len(jobs), SMARTSTOCK_MAX_WORKERS)) as ex:
         list(ex.map(lambda j: _one(*j), jobs))
 
 @st.cache_resource(show_spinner=False)
@@ -456,15 +478,16 @@ def _http_session():
     try:
         if Retry is not None:
             retry = Retry(
-                total=2,
-                connect=2,
-                read=2,
-                backoff_factor=0.25,
-                status_forcelist=(429, 500, 502, 503, 504),
+                total=1,
+                connect=1,
+                read=1,
+                backoff_factor=0.35,
+                # Do not retry 429. Retrying rate-limit responses burns quota and slows the UI.
+                status_forcelist=(500, 502, 503, 504),
                 allowed_methods=frozenset(["GET"]),
                 raise_on_status=False,
             )
-            adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32, max_retries=retry)
+            adapter = HTTPAdapter(pool_connections=8, pool_maxsize=16, max_retries=retry)
             sess.mount("https://", adapter)
             sess.mount("http://", adapter)
     except Exception:
@@ -477,10 +500,95 @@ def _params_items(params):
 def _key_fingerprint(key):
     return hashlib.sha1(str(key or "").encode("utf-8")).hexdigest()[:10]
 
-@st.cache_data(ttl=FMP_RAW_CACHE_TTL, show_spinner=False)
+
+def _fmp_cache_key(endpoint, params_items, base, key_fingerprint):
+    payload = {
+        "endpoint": str(endpoint).lstrip("/"),
+        "params": list(tuple(params_items or ())),
+        "base": str(base or "v3").lower(),
+        "key": str(key_fingerprint or ""),
+    }
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _cache_path(cache_key):
+    try:
+        SMARTSTOCK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return SMARTSTOCK_CACHE_DIR / f"{cache_key}.json"
+
+
+def _disk_cache_read(cache_key, max_age_seconds=None):
+    """Read cached raw JSON response. Returns None if absent/expired/corrupt."""
+    try:
+        path = _cache_path(cache_key)
+        if not path.exists():
+            return None
+        age = time.time() - path.stat().st_mtime
+        if max_age_seconds is not None and age > max_age_seconds:
+            return None
+        with path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload.get("data")
+    except Exception:
+        return None
+
+
+def _disk_cache_age(cache_key):
+    try:
+        path = _cache_path(cache_key)
+        return max(0.0, time.time() - path.stat().st_mtime) if path.exists() else None
+    except Exception:
+        return None
+
+
+def _disk_cache_write(cache_key, data):
+    """Persist only usable JSON data, never API errors."""
+    try:
+        if data in (None, "", [], {}):
+            return
+        SMARTSTOCK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _cache_path(cache_key)
+        tmp = path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump({"saved_at": time.time(), "data": data}, f, ensure_ascii=False)
+        tmp.replace(path)
+    except Exception:
+        pass
+
+
+def _stale_wrap(data, reason="", cache_key=None):
+    """Return stale cached data while recording the reason in session state."""
+    try:
+        age = _disk_cache_age(cache_key) if cache_key else None
+        extra = f" cache age {age/3600:.1f}h." if age is not None else ""
+        st.session_state["_smartstock_data_notice"] = f"{reason}{extra}".strip()
+    except Exception:
+        pass
+    return copy.deepcopy(data)
+
+
+def _mark_fmp_rate_limited(message=""):
+    try:
+        st.session_state["_fmp_rate_limited_until"] = time.time() + FMP_RATE_LIMIT_COOLDOWN
+        if message:
+            st.session_state["_last_fmp_error"] = clean_text(str(message))[:800] if "clean_text" in globals() else str(message)[:800]
+    except Exception:
+        pass
+
+
+def _fmp_rate_limited_active():
+    try:
+        return time.time() < float(st.session_state.get("_fmp_rate_limited_until", 0))
+    except Exception:
+        return False
+
+
+@st.cache_data(ttl=FMP_MEMORY_CACHE_TTL, show_spinner=False)
 def _fmp_get_cached(endpoint, params_items, base, key_fingerprint):
-    """Cached raw FMP/RSS HTTP layer. Keeps repeated reruns from burning API limits."""
-    del key_fingerprint
+    """Raw FMP HTTP layer with disk cache, stale-cache fallback, and rate-limit circuit breaker."""
     key = _get_fmp_key()
     if not key:
         return {"__smartstock_error__": "FMP_API_KEY is missing in Streamlit Secrets/environment."}
@@ -494,18 +602,63 @@ def _fmp_get_cached(endpoint, params_items, base, key_fingerprint):
     else:
         base_url = _FMP_V3_BASE
 
+    cache_key = _fmp_cache_key(endpoint, params_items, base_l, key_fingerprint)
+
+    # Fresh disk cache survives Streamlit restarts and deployment reloads.
+    fresh = _disk_cache_read(cache_key, max_age_seconds=FMP_RAW_CACHE_TTL)
+    if fresh is not None:
+        return copy.deepcopy(fresh)
+
+    if SMARTSTOCK_CACHE_ONLY or _fmp_rate_limited_active():
+        stale = _disk_cache_read(cache_key, max_age_seconds=FMP_STALE_CACHE_MAX_AGE)
+        if stale is not None:
+            return _stale_wrap(stale, "FMP circuit breaker/cache-only active; using stale cached data.", cache_key)
+        return {"__smartstock_error__": f"FMP temporarily unavailable/rate-limited for /{endpoint}; no stale cache exists yet."}
+
     p = {k: v for k, v in tuple(params_items or ())}
     p["apikey"] = key
     try:
         r = _http_session().get(f"{base_url}/{endpoint}", params=p, timeout=FMP_TIMEOUT_SECONDS)
+        body = r.text or ""
+        if r.status_code == 429 or "Limit Reach" in body or "limit reach" in body.lower():
+            _mark_fmp_rate_limited(f"FMP HTTP 429 from /{endpoint}: {body[:500]}")
+            stale = _disk_cache_read(cache_key, max_age_seconds=FMP_STALE_CACHE_MAX_AGE)
+            if stale is not None:
+                return _stale_wrap(stale, "FMP rate limit reached; using stale cached data.", cache_key)
+            return {"__smartstock_error__": f"FMP HTTP 429 from /{endpoint}: {body[:500]}"}
+
         if r.status_code != 200:
-            return {"__smartstock_error__": f"FMP HTTP {r.status_code} from /{endpoint}: {r.text[:500]}"}
+            stale = _disk_cache_read(cache_key, max_age_seconds=FMP_STALE_CACHE_MAX_AGE)
+            if stale is not None:
+                return _stale_wrap(stale, f"FMP HTTP {r.status_code}; using stale cached data.", cache_key)
+            return {"__smartstock_error__": f"FMP HTTP {r.status_code} from /{endpoint}: {body[:500]}"}
+
         try:
             data = r.json()
         except Exception:
-            return {"__smartstock_error__": f"FMP returned non-JSON from /{endpoint}: {r.text[:500]}"}
-        return data
+            stale = _disk_cache_read(cache_key, max_age_seconds=FMP_STALE_CACHE_MAX_AGE)
+            if stale is not None:
+                return _stale_wrap(stale, "FMP returned non-JSON; using stale cached data.", cache_key)
+            return {"__smartstock_error__": f"FMP returned non-JSON from /{endpoint}: {body[:500]}"}
+
+        # Do not persist explicit FMP error payloads.
+        if isinstance(data, dict):
+            lowered = {str(k).lower(): v for k, v in data.items()}
+            if "error" in lowered or "error message" in lowered:
+                msg = str(data)[:800]
+                if "limit" in msg.lower():
+                    _mark_fmp_rate_limited(msg)
+                stale = _disk_cache_read(cache_key, max_age_seconds=FMP_STALE_CACHE_MAX_AGE)
+                if stale is not None:
+                    return _stale_wrap(stale, "FMP returned an API error; using stale cached data.", cache_key)
+                return {"__smartstock_error__": msg}
+        _disk_cache_write(cache_key, data)
+        return copy.deepcopy(data)
+
     except Exception as e:
+        stale = _disk_cache_read(cache_key, max_age_seconds=FMP_STALE_CACHE_MAX_AGE)
+        if stale is not None:
+            return _stale_wrap(stale, f"FMP request exception; using stale cached data.", cache_key)
         return {"__smartstock_error__": f"FMP request failed for {endpoint}: {e}"}
 
 
@@ -561,6 +714,83 @@ _FMP_SYMBOL_MAP = {
 def _fmp_symbol(symbol):
     s = str(symbol or "").upper().strip()
     return _FMP_SYMBOL_MAP.get(s, s)
+
+
+_YF_SYMBOL_REVERSE_MAP = {
+    "CLUSD": "CL=F", "BZUSD": "BZ=F", "GCUSD": "GC=F", "SIUSD": "SI=F", "HGUSD": "HG=F", "NGUSD": "NG=F",
+    "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD",
+}
+
+
+def _yf_symbol(symbol):
+    s = str(symbol or "").upper().strip()
+    return _YF_SYMBOL_REVERSE_MAP.get(s, s)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _yf_build_hist(ticker, period="1y", interval="1d"):
+    """Optional backup for price history when FMP is rate-limited or unavailable.
+
+    This is intentionally price/history fallback only; FMP remains the primary
+    source. The UI labels the data source when this path is used.
+    """
+    if not SMARTSTOCK_ALLOW_YFINANCE_FALLBACK:
+        return pd.DataFrame()
+    try:
+        import yfinance as yf
+    except Exception:
+        return pd.DataFrame()
+    try:
+        yf_sym = _yf_symbol(ticker)
+        interval_l = str(interval or "1d").lower()
+        h = yf.Ticker(yf_sym).history(period=period, interval=interval_l, auto_adjust=True, prepost=False)
+        if h is None or h.empty:
+            return pd.DataFrame()
+        h = h.reset_index()
+        h = h.rename(columns={"Date": "date", "Datetime": "date"})
+        out = _normalize_ohlcv(h)
+        if not out.empty:
+            out.attrs["data_source"] = "Yahoo Finance fallback"
+        return out
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _yf_build_info(ticker):
+    if not SMARTSTOCK_ALLOW_YFINANCE_FALLBACK:
+        return {}
+    try:
+        import yfinance as yf
+        data = yf.Ticker(_yf_symbol(ticker)).get_info() or {}
+        if isinstance(data, dict) and data:
+            data["_dataSource"] = "Yahoo Finance fallback"
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _merge_yf_info_missing(info, ticker):
+    """Fill missing UI fields from Yahoo fallback without overwriting FMP values."""
+    info = dict(info or {})
+    yf_info = _yf_build_info(ticker)
+    if not yf_info:
+        return info
+    filled = False
+    for k, v in yf_info.items():
+        if k.startswith("_"):
+            continue
+        if v in (None, "", [], {}) or str(v).lower() in {"nan", "none", "null"}:
+            continue
+        if info.get(k) in (None, "", 0, 0.0, [], {}):
+            info[k] = v
+            filled = True
+    if filled:
+        src = info.get("_dataSource") or "FMP API"
+        if "Yahoo" not in src:
+            info["_dataSource"] = f"{src} + Yahoo fallback"
+    return info
 
 
 def _period_to_days(period, default=730):
@@ -936,10 +1166,18 @@ def _fmp_build_hist(ticker, period="2y"):
                 "Close": [price],
                 "Volume": [_num(q.get("volume"), default=0)],
             }, index=idx)
+        yf_h = _yf_build_hist(raw_symbol, period=period, interval="1d")
+        if yf_h is not None and not yf_h.empty:
+            try:
+                st.session_state["_smartstock_data_notice"] = "FMP price history unavailable/rate-limited; using Yahoo Finance fallback for prices."
+            except Exception:
+                pass
+            return yf_h
         return pd.DataFrame()
     except Exception as e:
         _remember_fmp_error(f"FMP historical loader failed for {sym}: {e}")
-        return pd.DataFrame()
+        yf_h = _yf_build_hist(raw_symbol, period=period, interval="1d")
+        return yf_h if yf_h is not None else pd.DataFrame()
 
 def _fmp_build_intraday(ticker, period="5d", interval="5m"):
     interval_map = {
@@ -960,10 +1198,18 @@ def _fmp_build_intraday(ticker, period="5d", interval="5m"):
                 continue
             cutoff = pd.Timestamp.today() - pd.Timedelta(days=_period_to_days(period, default=30))
             return df[df.index >= cutoff]
+        yf_h = _yf_build_hist(ticker, period=period, interval=interval)
+        if yf_h is not None and not yf_h.empty:
+            try:
+                st.session_state["_smartstock_data_notice"] = "FMP intraday history unavailable/rate-limited; using Yahoo Finance fallback for prices."
+            except Exception:
+                pass
+            return yf_h
         return pd.DataFrame()
     except Exception as e:
         _remember_fmp_error(f"FMP intraday loader failed for {sym}: {e}")
-        return pd.DataFrame()
+        yf_h = _yf_build_hist(ticker, period=period, interval=interval)
+        return yf_h if yf_h is not None else pd.DataFrame()
 
 def _fmp_statement_rows(endpoint, ticker, limit=8, period=None):
     sym = _fmp_symbol(ticker)
@@ -1523,14 +1769,18 @@ def _fmp_build_info(ticker):
         if info.get("priceToBook") is None and price not in (None, 0) and info.get("bookValue") not in (None, 0):
             info["priceToBook"] = price / info["bookValue"]
 
+        info = _merge_yf_info_missing(info, sym)
         info.setdefault("shortName", sym)
         info.setdefault("longName", info.get("shortName", sym))
+        info.setdefault("_dataSource", "FMP API")
         return info
 
     except Exception as e:
         _remember_fmp_error(f"FMP info builder failed for {sym}: {e}")
+        info = _merge_yf_info_missing(info, sym)
         info.setdefault("shortName", sym)
         info.setdefault("longName", info.get("shortName", sym))
+        info.setdefault("_dataSource", "FMP API" if info.get("currentPrice") else "Yahoo Finance fallback" if SMARTSTOCK_ALLOW_YFINANCE_FALLBACK else "FMP API")
         return info
 
 
@@ -1796,7 +2046,7 @@ def _fmp_news_items(ticker="", limit=50):
 
 
 class _FMPTicker:
-    """Small yfinance-like wrapper backed entirely by FMP."""
+    """Small yfinance-like wrapper backed by FMP primary + optional Yahoo fallback."""
     def __init__(self, symbol):
         self.symbol = str(symbol or "").upper().strip()
 
@@ -1805,7 +2055,9 @@ class _FMPTicker:
         return self.get_info()
 
     def get_info(self):
-        return _fmp_build_info(self.symbol) or {"symbol": self.symbol, "shortName": self.symbol, "longName": self.symbol}
+        info = _fmp_build_info(self.symbol) or {}
+        info = _merge_yf_info_missing(info, self.symbol)
+        return info or {"symbol": self.symbol, "shortName": self.symbol, "longName": self.symbol, "_dataSource": "Unavailable"}
 
     def history(self, period="1y", interval="1d", auto_adjust=True, prepost=False, **kwargs):
         del auto_adjust, prepost, kwargs
@@ -1829,23 +2081,41 @@ class _FMPTicker:
 
 def _fetch_stock_uncached(ticker, period="2y"):
     try:
-        if not _get_fmp_key():
+        fmp_key_available = bool(_get_fmp_key())
+        if not fmp_key_available and not SMARTSTOCK_ALLOW_YFINANCE_FALLBACK:
             return None, "FMP_API_KEY is missing. Add it to Streamlit Secrets, then reboot the app."
 
-        hist = _fmp_build_hist(ticker, period)
-        if hist.empty:
+        hist = _fmp_build_hist(ticker, period) if fmp_key_available and not SMARTSTOCK_CACHE_ONLY else pd.DataFrame()
+        used_fallback_hist = False
+        if hist is None or hist.empty:
+            hist = _yf_build_hist(ticker, period=period, interval="1d")
+            used_fallback_hist = hist is not None and not hist.empty
+
+        if hist is None or hist.empty:
             last_err = ""
             try:
                 last_err = st.session_state.get("_last_fmp_error", "")
             except Exception:
                 pass
             detail = f" Last FMP message: {last_err}" if last_err else ""
-            return None, f"No FMP price history returned for '{ticker}'. Check your FMP key/plan or endpoint access.{detail}"
+            return None, (
+                f"No price history returned for '{ticker}'. FMP is unavailable/rate-limited and "
+                f"Yahoo fallback is unavailable or not installed. Install yfinance or wait for FMP quota reset.{detail}"
+            )
 
-        info = _fmp_build_info(ticker)
-        if not info:
-            info = {"symbol": _fmp_symbol(ticker), "shortName": _fmp_symbol(ticker), "longName": _fmp_symbol(ticker)}
-        info = _fmp_repair_ui_fields(info, ticker, hist)
+        if used_fallback_hist:
+            info = _yf_build_info(ticker) or {"symbol": _yf_symbol(ticker), "shortName": _yf_symbol(ticker), "longName": _yf_symbol(ticker)}
+            info["_dataSource"] = "Yahoo Finance fallback (FMP unavailable/rate-limited)"
+        else:
+            info = _fmp_build_info(ticker)
+            if not info:
+                info = {"symbol": _fmp_symbol(ticker), "shortName": _fmp_symbol(ticker), "longName": _fmp_symbol(ticker)}
+            info = _merge_yf_info_missing(info, ticker)
+            info = _fmp_repair_ui_fields(info, ticker, hist)
+
+        if hist.attrs.get("data_source"):
+            info["_priceSource"] = hist.attrs.get("data_source")
+        info.setdefault("_dataSource", "FMP API")
         return {"info": info, "hist": hist}, None
     except Exception as e:
         return None, str(e)
@@ -1875,9 +2145,13 @@ def fetch_chart_history(ticker, period="1y", interval="1d", prepost=False):
             return h, None
     except Exception as e:
         return None, str(e)
-    return None, "No FMP chart history returned. Check your FMP plan, ticker, or interval."
+    return None, "No chart history returned from FMP or fallback provider. Check FMP quota/plan, ticker, interval, or install yfinance."
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_peers(tickers: tuple, period="1y"):
+    """Fetch peer histories/info with a small worker cap to avoid FMP throttling."""
+    out = {}
+    tickers = tuple(dict.fromkeys([str(t).upper().strip() for t in tickers if str(t).strip()]))
+
     def _one(t):
         try:
             s = _fmp_ticker(t)
@@ -1888,24 +2162,13 @@ def fetch_peers(tickers: tuple, period="1y"):
             pass
         return t, None
 
-    out = {}
-    with ThreadPoolExecutor(max_workers=min(len(tickers), 6)) as ex:
+    if not tickers:
+        return out
+    # Small cap. Larger universes should rely on cached responses, not API floods.
+    with ThreadPoolExecutor(max_workers=min(len(tickers), SMARTSTOCK_MAX_WORKERS)) as ex:
         for t, result in ex.map(_one, tickers):
             if result is not None:
                 out[t] = result
-    return out
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_peers(tickers: tuple, period="1y"):
-    out = {}
-    for t in tickers:
-        try:
-            s = _fmp_ticker(t)
-            h = s.history(period=period, auto_adjust=True)
-            if not h.empty:
-                out[t] = {"info": s.info, "hist": h}
-        except Exception:
-            pass
     return out
 
 
@@ -3991,7 +4254,7 @@ def fetch_market_regime_for_investor(refresh_token=0):
         except Exception:
             return sym, None
 
-    with ThreadPoolExecutor(max_workers=len(symbols)) as ex:
+    with ThreadPoolExecutor(max_workers=min(len(symbols), SMARTSTOCK_MAX_WORKERS)) as ex:
         for sym, result in ex.map(_fetch_sym, symbols):
             if result is not None:
                 rows[sym] = result
@@ -4070,7 +4333,7 @@ def fetch_investor_universe_data(tickers_tuple, refresh_token=0):
             return None
 
     equity_tickers = [t for t in tickers_tuple if str(t).upper() not in _CASH]
-    with ThreadPoolExecutor(max_workers=min(len(equity_tickers), 8)) as ex:
+    with ThreadPoolExecutor(max_workers=min(len(equity_tickers), SMARTSTOCK_MAX_WORKERS)) as ex:
         results = list(ex.map(_fetch_one, equity_tickers))
     return pd.DataFrame([r for r in results if r is not None])
 
@@ -5982,70 +6245,71 @@ def _ranking_note(pct, vol20, vol_ratio):
     if vol20 > 55: return "High volatility; suitable for active trading but position size should be smaller."
     if abs(pct) < 0.5 and vol20 < 25: return "Stable move; better for trend confirmation than short-term momentum."
     return "Moderate move; compare with sector and volume confirmation."
-@st.cache_data(ttl=900, show_spinner=False)
-def ai_score_universe(tickers_tuple, period="1y", model="risk_loving"):
-    """Score a universe with the built-in AI thesis model, grouped by reported industry."""
-    try:
-        spy_hist = _fmp_ticker("SPY").history(period=period, auto_adjust=True)
-    except Exception:
-        spy_hist = pd.DataFrame()
+@st.cache_data(ttl=3600, show_spinner=False)
+def ranking_snapshot(tickers_tuple, period="3mo"):
+    """Market movers snapshot with bounded provider calls.
 
-    def _one(t):
+    This was missing in the uploaded file, which made Market Rankings crash.
+    The function is intentionally sequential/budget-friendly; speed comes from
+    the raw response cache and per-function cache, not from API storms.
+    """
+    rows = []
+    for t in tickers_tuple:
         try:
             y = _fmp_ticker(t)
             h = y.history(period=period, auto_adjust=True)
-            if h is None or h.empty or len(h) < 35:
-                return None
+            if h is None or h.empty or len(h) < 2:
+                continue
+            close = pd.to_numeric(h["Close"], errors="coerce").dropna()
+            if len(close) < 2:
+                continue
+            last = float(close.iloc[-1])
+            prev = float(close.iloc[-2])
+            chg = last - prev
+            pct = chg / prev * 100 if prev else 0.0
+            ret = close.pct_change().dropna()
+            vol20 = float(ret.tail(20).std() * np.sqrt(252) * 100) if len(ret) >= 2 else 0.0
+            v = pd.to_numeric(h["Volume"], errors="coerce").dropna() if "Volume" in h else pd.Series(dtype=float)
+            vol_mean = float(v.tail(20).mean()) if len(v) >= 5 else 0.0
+            vol_ratio = float(v.iloc[-1] / vol_mean) if vol_mean else 0.0
             try:
                 inf = y.get_info()
             except Exception:
                 inf = {}
-            hta   = calc_ta(h)
-            risk  = calc_risk(h, spy_hist)
-            scores = score_from_metrics(inf, risk, hta, model=model)
-            close  = h["Close"].dropna()
-            last_price = safe_float(close.iloc[-1], 0) if len(close) else 0
-            ret_3m = 0.0
-            if len(close) > 63 and close.iloc[-64]:
-                ret_3m = (close.iloc[-1] / close.iloc[-64] - 1) * 100
-            return {
+            market_cap = float(safe_float(inf.get("marketCap"), 0))
+            dollar_vol = float(last * v.iloc[-1]) if len(v) else 0.0
+            momentum_5d = float((close.iloc[-1] / close.iloc[-6] - 1) * 100) if len(close) >= 6 and close.iloc[-6] else pct
+            gap_pct = float((h["Open"].iloc[-1] / close.iloc[-2] - 1) * 100) if "Open" in h and len(close) >= 2 and close.iloc[-2] else 0.0
+            liquidity_score = min(100.0, max(0.0, np.log10(max(dollar_vol, 1)) * 10 - 35))
+            trader_score = (abs(pct) * 1.8) + (vol20 * 0.20) + (vol_ratio * 7.0) + (abs(momentum_5d) * 0.8) + (liquidity_score * 0.15)
+            rows.append({
                 "Ticker": t,
-                "Company": str(inf.get("shortName") or inf.get("longName") or t)[:46],
+                "Company": str(inf.get("shortName") or inf.get("longName") or t)[:42],
+                "Country": inf.get("country") or "Unknown",
                 "Sector": inf.get("sector") or "Unknown",
                 "Industry": inf.get("industry") or "Unknown",
-                "Country": inf.get("country") or "Unknown",
-                "Market Cap $B": round(safe_float(inf.get("marketCap"), 0) / 1e9, 2),
-                "Last Price": round(last_price, 2),
-                "AI Score": scores.get("overall_score", 0),
-                "Recommendation": scores.get("recommendation_model", "Hold"),
-                "Model": scores.get("model_name", AI_RISK_MODEL_NAMES.get(model, model)),
-                "Growth": scores.get("growth_score", 0),
-                "Momentum": scores.get("momentum_score", 0),
-                "Quality": scores.get("quality_score", 0),
-                "Valuation": scores.get("valuation_score", 0),
-                "Risk Score": scores.get("risk_score", 0),
-                "3M Return %": round(ret_3m, 2),
-                "Sharpe": risk.get("sharpe", 0),
-                "Max Drawdown %": risk.get("max_dd", 0),
-                "Annual Vol %": risk.get("vol", 0),
-                "Why It Scores This Way": (
-                    f"Growth {scores.get('growth_score', 0)}/100 and momentum {scores.get('momentum_score', 0)}/100 "
-                    f"are scored under the {AI_RISK_MODEL_NAMES.get(model, model)} model; quality {scores.get('quality_score', 0)}/100, "
-                    f"valuation {scores.get('valuation_score', 0)}/100, and risk {scores.get('risk_score', 0)}/100 adjust the final score."
-                ),
-            }
+                "Market Cap": round(market_cap, 0),
+                "Market Cap $B": round(market_cap / 1e9, 2) if market_cap else 0,
+                "Last Price": round(last, 2),
+                "Change $": round(chg, 2),
+                "Change %": round(pct, 2),
+                "5D Momentum %": round(momentum_5d, 2),
+                "Opening Gap %": round(gap_pct, 2),
+                "20D Vol %": round(vol20, 2),
+                "Volume Ratio": round(vol_ratio, 2),
+                "Dollar Volume $M": round(dollar_vol / 1e6, 2),
+                "Liquidity Score": round(liquidity_score, 1),
+                "Trader Composite Score": round(trader_score, 1),
+                "Investment Note": _ranking_note(pct, vol20, vol_ratio),
+            })
         except Exception:
-            return None
+            continue
+    return pd.DataFrame(rows)
 
-    with ThreadPoolExecutor(max_workers=min(len(tickers_tuple), 8)) as ex:
-        results = list(ex.map(_one, tickers_tuple))
-    df = pd.DataFrame([r for r in results if r is not None])
-    if not df.empty:
-        df = df.sort_values(["Industry", "AI Score"], ascending=[True, False]).reset_index(drop=True)
-    return df
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def ai_score_universe(tickers_tuple, period="1y", model="risk_loving"):
-    """Score a universe with the same built-in AI thesis model, grouped by reported industry."""
+    """Score a universe with the built-in AI thesis model, budget-safe and cached."""
     rows = []
     try:
         spy_hist = _fmp_ticker("SPY").history(period=period, auto_adjust=True)
@@ -6064,7 +6328,7 @@ def ai_score_universe(tickers_tuple, period="1y", model="risk_loving"):
             hta = calc_ta(h)
             risk = calc_risk(h, spy_hist)
             scores = score_from_metrics(inf, risk, hta, model=model)
-            close = h["Close"].dropna()
+            close = pd.to_numeric(h["Close"], errors="coerce").dropna()
             last_price = safe_float(close.iloc[-1], 0) if len(close) else 0
             ret_3m = 0.0
             if len(close) > 63 and close.iloc[-64]:
@@ -6101,6 +6365,8 @@ def ai_score_universe(tickers_tuple, period="1y", model="risk_loving"):
     if not df.empty:
         df = df.sort_values(["Industry", "AI Score"], ascending=[True, False]).reset_index(drop=True)
     return df
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def index_snapshot(period="1mo"):
     rows = []
@@ -6445,7 +6711,7 @@ def main():
                 st.rerun()
         with st.expander("Data / disclaimer", expanded=False):
             st.markdown('<div style="font-size:10px;color:#334155;line-height:1.7">'
-                        'Price data: FMP API<br>Indicators: ta library<br>'
+                        'Price data: FMP primary, stale local cache / Yahoo Finance fallback when FMP is rate-limited<br>Indicators: ta library<br>'
                         f'Risk-free rate for Sharpe/alpha: {RISK_FREE_ANNUAL_RATE:.2%} '
                         '(set SMARTSTOCK_RISK_FREE_RATE to change)<br>'
                         'AI Thesis: built-in rule engine<br>⚠️ Not financial advice.</div>',
@@ -6496,6 +6762,9 @@ def main():
 
     last_index = hist.index[-1] if isinstance(hist, pd.DataFrame) and not hist.empty else datetime.now()
     last_stamp = last_index.strftime('%b %d, %Y %H:%M') if hasattr(last_index, 'strftime') else datetime.now().strftime('%b %d, %Y')
+    source_label = info.get("_dataSource") or info.get("_priceSource") or "FMP API"
+    if info.get("_priceSource") and info.get("_priceSource") not in source_label:
+        source_label = f"{source_label} · prices: {info.get('_priceSource')}"
     st.markdown(f"""
     <div class="top-header">
       <div>
@@ -6511,12 +6780,15 @@ def main():
         <div class="top-header-price-main">${price:,.2f}</div>
         <div style="font-size:1.05rem;font-weight:600;color:{chg_clr};font-family:monospace;margin-top:6px;white-space:nowrap">
           {sign}{chg:.2f} &nbsp; ({sign}{chg_pct:.2f}%)</div>
-        <div style="font-size:11px;color:#334155;margin-top:5px;white-space:nowrap">{last_stamp} · FMP API</div>
+        <div style="font-size:11px;color:#334155;margin-top:5px;white-space:nowrap">{last_stamp} · {html.escape(str(source_label))}</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown('<div class="header-divider"></div>', unsafe_allow_html=True)
+    _notice = st.session_state.get("_smartstock_data_notice")
+    if _notice:
+        st.caption("Data notice: " + str(_notice))
 
     ms = st.columns(6)
     ms[0].metric("Market Cap",  fmtn(info.get("marketCap"),"$"))
@@ -7234,7 +7506,10 @@ def main():
         ]
         metric = c3.selectbox(tr("Ranking Metric"), metric_options, index=0, key="rank_metric")
         if c4.button(tr("Update Rankings"), key="update_rankings", use_container_width=True):
-            st.cache_data.clear()
+            try:
+                ranking_snapshot.clear()
+            except Exception:
+                pass
         with st.spinner("Updating rankings... Fetching latest prices, volatility, volume, and company info."):
             rank_df = ranking_snapshot(tuple(RANKING_UNIVERSES[industry_choice]), period="3mo")
         if rank_df.empty:
@@ -7301,7 +7576,10 @@ def main():
                 with ai_c4:
                     ai_model = render_ai_model_selector("Risk preference model", key="ai_model_market_rank")
                 if ai_c5.button("Update AI Scores", key="update_ai_rankings", use_container_width=True):
-                    st.cache_data.clear()
+                    try:
+                        ai_score_universe.clear()
+                    except Exception:
+                        pass
                 st.caption(ai_model_description(ai_model))
                 with st.spinner(f"Scoring companies with {AI_RISK_MODEL_NAMES.get(ai_model, ai_model)} model... This checks growth, momentum, quality, valuation, and risk for each ticker."):
                     ai_df = ai_score_universe(tuple(RANKING_UNIVERSES[ai_universe_choice]), period="1y", model=ai_model)
@@ -7348,7 +7626,10 @@ def main():
         ic1, ic2 = st.columns([1, 1])
         index_period = ic1.selectbox("Index period", ["5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y"], index=2, key="index_period")
         if ic2.button("Update Indexes", key="update_indexes", use_container_width=True):
-            st.cache_data.clear()
+            try:
+                index_snapshot.clear()
+            except Exception:
+                pass
         with st.spinner("Updating global indexes... Fetching latest market performance."):
             idx_df, curves = index_snapshot(period=index_period)
         if idx_df.empty:
@@ -7391,7 +7672,10 @@ def main():
         cm1, cm2 = st.columns([1, 1])
         commodity_period = cm1.selectbox("Commodity period", ["5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y"], index=2, key="commodity_period")
         if cm2.button("Update Commodities", key="update_commodities", use_container_width=True):
-            st.cache_data.clear()
+            try:
+                commodity_snapshot.clear()
+            except Exception:
+                pass
         with st.spinner("Updating commodities... Fetching latest futures prices and indicators."):
             comm_df, comm_curves = commodity_snapshot(period=commodity_period)
         if comm_df.empty:
