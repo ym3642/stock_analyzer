@@ -279,207 +279,20 @@ AMBER    = "#f59e0b"; PURPLE="#8b5cf6"; TEAL  = "#06b6d4"
 
 
 # ══════════════════════════════════════════════════════════════════
-#  LANGUAGE / TRANSLATION LAYER
+#  ENGLISH-ONLY TEXT HELPERS
 # ══════════════════════════════════════════════════════════════════
-LANG_OPTIONS = {"English": "en", "简体中文": "zh"}
-
-ZH = {
-    "SmartStock": "股票分析器", "PROFESSIONAL EDITION": "专业版", "Language": "语言",
-    "Overview": "概览", "Valuation": "估值", "Risk": "风险", "Industry": "行业", "Technical": "技术分析", "Comparison": "对比", "Company News": "公司新闻", "News": "新闻", "Market News": "全球市场新闻", "Market Rankings": "市场排名", "Global Indexes": "全球指数", "Commodities": "大宗商品", "AI Thesis": "AI投资论点",
-    "Price Chart": "价格图表", "Fundamentals": "基本面", "About": "公司简介", "Business Summary": "业务摘要", "Valuation Multiples": "估值倍数", "Analyst Consensus": "分析师共识",
-    "Interactive DCF Fair Value Calculator": "交互式DCF公允价值计算器", "Quality & Profitability": "质量与盈利能力", "Risk & Performance Metrics vs S&P 500": "相对标普500的风险与表现指标",
-    "Drawdown from Peak": "峰值回撤", "Daily Return Distribution": "日收益率分布", "Rolling 60-Day Sharpe Ratio": "60日滚动夏普比率", "Annualised Rolling Volatility": "年化滚动波动率",
-    "Financial Health": "财务健康状况", "Industry Snapshot": "行业概况", "Peer Comparison": "同业比较", "Technical Indicators": "技术指标", "Support / Resistance": "支撑位 / 阻力位",
-    "Latest Stock / Company News": "最新股票/公司新闻", "Latest Company News": "最新公司新闻", "Built-in AI Investment Thesis": "内置AI投资论点", "Built-in AI-Style Comparison Summary": "内置AI风格对比总结",
-    "Ticker Symbol": "股票代码", "Historical Data Range": "历史数据范围", "Chart View Window": "图表显示窗口", "Price Chart Overlays": "价格图表叠加指标", "Moving Average Lines": "移动平均线",
-    "Data period": "数据周期", "Chart window": "图表窗口", "Show pre-market / after-hours curve": "显示盘前/盘后曲线",
-    "Regular-hours view: 9:30 AM–4:00 PM ET only. Overnight gaps are removed from the x-axis.": "常规交易时段视图：仅显示美国东部时间上午9:30至下午4:00，横轴会移除隔夜空白。",
-    "Market Cap": "市值", "P/E (TTM)": "市盈率(TTM)", "52W High": "52周高点", "52W Low": "52周低点", "Avg Volume": "平均成交量", "Div Yield": "股息率",
-    "Revenue": "营收", "Net Income": "净利润", "EBITDA": "EBITDA", "Free Cash Flow": "自由现金流", "EPS (TTM)": "每股收益(TTM)", "Forward EPS": "预期每股收益",
-    "Gross Margin": "毛利率", "Net Margin": "净利率", "Op. Margin": "营业利润率", "Rev Growth YoY": "营收同比增长", "EPS Growth": "EPS增长", "ROE": "净资产收益率", "ROA": "资产收益率",
-    "Total Debt": "总债务", "Total Cash": "总现金", "Debt/Equity": "债务/权益", "Current Ratio": "流动比率", "Quick Ratio": "速动比率", "Book Value/Sh": "每股账面价值", "Payout Ratio": "派息率",
-    "Beta": "贝塔系数", "Short % Float": "流通股做空比例", "Shares Out": "发行股数", "Float": "流通股", "CEO": "首席执行官", "Sector": "板块", "Employees": "员工数", "Country": "国家",
-    "Trailing P/E": "历史市盈率", "Forward P/E": "预期市盈率", "PEG Ratio": "PEG比率", "Price / Book": "市净率", "Price / Sales": "市销率", "EV / EBITDA": "企业价值/EBITDA", "EV / Revenue": "企业价值/营收",
-    "DCF Intrinsic Value": "DCF内在价值", "Buy Below (w/ MoS)": "安全边际买入价", "Current Price": "当前价格", "DCF Upside": "DCF上涨空间",
-    "Annual Vol.": "年化波动率", "Sharpe Ratio": "夏普比率", "Sortino": "索提诺比率", "Max Drawdown": "最大回撤", "Calmar Ratio": "卡玛比率", "1yr Return": "1年收益率",
-    "Alpha vs SPY": "相对SPY阿尔法", "VaR 95%": "95%风险价值", "CVaR 95%": "95%条件风险价值", "Win Rate": "胜率", "R² vs SPY": "相对SPY的R²", "Tracking Err": "跟踪误差", "Info Ratio": "信息比率",
-    "Size": "规模", "Exchange": "交易所", "RSI (14-day)": "RSI(14日)", "ADX (14-day)": "ADX(14日)", "ATR (14-day)": "ATR(14日)", "Volatility 20d": "20日波动率",
-    "Important Headlines": "重要新闻数", "Positive": "利好", "Negative": "利空", "Neutral": "中性", "Avg Influence": "平均影响", "Search news by keyword": "按关键词搜索新闻", "Search market news by keyword": "按关键词搜索市场新闻", "Search market news by ticker": "按股票代码搜索市场新闻", "Order news by": "新闻排序", "Order by": "排序方式",
-    "Importance first": "重要性优先", "Newest first": "最新优先", "Update News": "更新新闻", "Update": "更新", "Open source": "打开来源", "Influence": "股价影响", "Importance": "重要性",
-    "No short summary was provided by the source.": "来源未提供简短摘要。", "No matching recent news found. Try a broader keyword or click Update News.": "未找到匹配的近期新闻。请尝试更宽泛的关键词，或点击更新新闻。",
-    "Latest Market News": "最新全球市场新闻", "Market news by importance/time with AI-style impact analysis.": "按重要性/发布时间排序的全球市场新闻，并带AI风格影响分析。", "Country Filter": "国家筛选", "Category Filter": "类别筛选", "Industry Impact Filter": "行业影响筛选", "Update Market News": "更新市场新闻",
-    "Priority: FMP first, then WSJ/RSS and broad financial news. Duplicate/overlapping headlines are filtered.": "优先级：FMP优先，其次为WSJ/RSS和其他财经新闻；重复或重叠标题会被过滤。",
-    "Market Movers & Volatility Ranking": "市场异动与波动率排名", "Global Index Performance": "全球主要指数表现", "Industry Filter": "行业筛选", "Ranking Size": "排名数量", "Ranking Metric": "排名指标", "Update Rankings": "更新排名", "Top Movers Table": "异动股票表", "Top Price Change Chart": "价格变动排名图", "Top Volatility Chart": "波动率排名图", "All Industries": "全部行业", "Technology": "科技", "Semiconductors": "半导体", "Software": "软件", "Financials": "金融", "Energy": "能源", "Healthcare": "医疗保健", "Consumer": "消费", "Ticker": "股票代码", "Company": "公司", "Last Price": "最新价", "Change $": "价格变化$", "Change %": "涨跌幅%", "20D Vol %": "20日波动率%", "Volume Ratio": "成交量倍数", "Investment Note": "投资备注", "Major Index Curves": "主要指数走势", "Index Ranking by % Change": "按涨跌幅排名的指数", "Commodity Dashboard": "大宗商品仪表盘", "Commodity Curves": "大宗商品走势", "Commodity Indicators": "大宗商品指标", "Display indexes on chart": "选择图表显示的指数", "Display commodities on chart": "选择图表显示的大宗商品",
-}
-
-
-ZH.update({
-    "Company News": "公司新闻",
-    "Search Company by Name": "按公司名称搜索",
-    "Company keyword search": "公司关键词搜索",
-    "Matching companies": "匹配公司",
-    "Use selected company": "使用选中的公司",
-    "No company matches found. Try a broader keyword or type the ticker directly.": "未找到匹配公司。请尝试更宽泛的关键词，或直接输入股票代码。",
-    "Direct ticker symbol": "直接输入股票代码",
-    "Search market news by keyword": "按关键词搜索市场新闻",
-    "Search market news by ticker": "按股票代码搜索市场新闻",
-    "Order by": "排序方式",
-    "Number of headlines": "新闻数量",
-    "Headlines": "新闻条数",
-    "Avg Importance": "平均重要性",
-    "Global Items": "全球新闻数",
-    "Top Theme": "主要主题",
-    "Good for": "利好对象",
-    "Bad for": "利空对象",
-    "Watch": "关注事项",
-    "Affected": "相关标的",
-    "Importance": "重要性",
-    "Open source": "打开来源",
-    "Mixed / Watch": "混合/观察",
-    "All Categories": "全部类别",
-    "Policy / Regulation": "政策/监管",
-    "Central Bank / Rates": "央行/利率",
-    "Geopolitics / Conflict": "地缘政治/冲突",
-    "Financial Release": "经济/财务发布",
-    "Management Change": "管理层变动",
-    "M&A / Strategic Deal": "并购/战略交易",
-    "Commodities / Energy": "大宗商品/能源",
-    "Technology / AI": "科技/人工智能",
-    "Banking / Credit": "银行/信用",
-    "Healthcare / FDA": "医疗/FDA",
-    "Earnings / Guidance": "财报/指引",
-    "Macro Data": "宏观数据",
-    "Legal / Investigation": "法律/调查",
-    "General Market News": "一般市场新闻",
-    "All Countries": "全部国家/地区",
-    "United States": "美国",
-    "Global": "全球",
-    "China": "中国",
-    "Europe": "欧洲",
-    "Japan": "日本",
-    "Middle East": "中东",
-    "United Kingdom": "英国",
-    "Canada": "加拿大",
-    "Emerging Markets": "新兴市场",
-    "Software / Cloud": "软件/云计算",
-    "Banks": "银行",
-    "Defense": "国防",
-    "Airlines / Travel": "航空/旅游",
-    "Shipping": "航运",
-    "Industrials": "工业",
-    "Consumer / Retail": "消费/零售",
-    "Autos": "汽车",
-    "Biotech": "生物科技",
-    "Utilities": "公用事业",
-    "Real Estate": "房地产",
-    "Materials": "材料",
-    "Crypto": "加密资产",
-    "No broad market news matched these filters. Try a broader keyword, ticker, country, category, or industry filter.": "没有符合筛选条件的市场新闻。请尝试更宽泛的关键词、股票代码、国家/地区、类别或行业筛选。",
-    "Market news by importance/time with AI-style impact analysis. Sources prioritize FMP and WSJ first, then reliable broad RSS discovery.": "按重要性/发布时间展示全球市场新闻，并提供AI风格影响分析。来源优先使用FMP和WSJ，其次使用可靠的广泛RSS新闻。",
-})
-
-
-ZH.update({
-    "Investor View": "投资大师视角",
-    "Famous Investor Simulator": "投资大师模拟器",
-    "Investor profile": "投资者风格",
-    "Model blend": "模型融合比例",
-    "Max holdings": "最大持仓数量",
-    "Market stance": "市场立场",
-    "Use latest market-news shock layer": "使用最新市场新闻冲击层",
-    "Balanced": "平衡",
-    "Defensive": "防御",
-    "Aggressive": "进攻",
-    "Simulated portfolio": "模拟组合",
-    "Sector allocation": "板块配置",
-    "Portfolio allocation": "组合配置",
-    "Style Match": "风格匹配",
-    "Conviction": "信心强度",
-    "Risk Level": "风险水平",
-    "Cash / Defense": "现金/防御",
-    "Current market view": "当前市场观点",
-    "What this investor may like now": "当前可能偏好的方向",
-    "What this investor may avoid now": "当前可能回避的方向",
-    "Open-source model blend": "开源模型融合",
-    "This is a simulated educational model, not the real investor's opinion or financial advice.": "这是教育用途的模拟模型，并不代表该投资者真实观点，也不是投资建议。",
-    "Company / Asset": "公司/资产",
-    "Weight": "权重",
-    "Reason": "原因",
-    "Investor-style thesis": "投资者风格论点",
-    "Market Regime": "市场环境",
-    "Risk-on Score": "风险偏好评分",
-    "Top Sector": "最大板块",
-    "Concentration": "集中度",
-    "Use selected investor portfolio as watchlist": "将模拟组合用作观察清单",
-    "Investor decision backtest & comparison": "投资者决策回测与对比",
-    "Backtest window": "回测窗口",
-    "Backtest method": "回测方法",
-    "Monthly": "月度再平衡",
-    "Buy & Hold": "买入并持有",
-    "Compare two investor decisions": "对比两个投资者决策",
-    "Compare with": "对比对象",
-    "Enable comparison to test another investor model.": "启用对比以测试另一个投资者模型。",
-    "Total Return": "总收益率",
-    "Annual Return": "年化收益率",
-    "Annual Volatility": "年化波动率",
-    "Max Drawdown": "最大回撤",
-    "Sharpe": "夏普比率",
-    "Sortino": "索提诺比率",
-    "Calmar": "卡玛比率",
-    "VaR 95%": "95%风险价值",
-    "CVaR 95%": "95%条件风险价值",
-    "Win Rate": "胜率",
-    "Best Day": "最佳单日",
-    "Worst Day": "最差单日",
-    "Cash Weight": "现金权重",
-    "simulated holdings": "模拟持仓",
-    "Equity Exposure": "权益仓位",
-    "AI portfolio explanation": "AI组合解释",
-    "AI concise header": "AI简明标题",
-    "Why this portfolio": "为什么这样配置",
-    "Key indicators": "关键指标",
-})
-
-FIN_GLOSSARY = {
-    "earnings": "财报/盈利", "revenue": "营收", "guidance": "业绩指引", "analyst": "分析师", "rating": "评级", "price target": "目标价", "upgrade": "上调评级", "downgrade": "下调评级",
-    "shares": "股票", "stock": "股票", "market": "市场", "profit": "利润", "loss": "亏损", "margin": "利润率", "cash flow": "现金流", "free cash flow": "自由现金流", "valuation": "估值",
-    "volatility": "波动率", "risk": "风险", "lawsuit": "诉讼", "investigation": "调查", "acquisition": "收购", "merger": "合并", "dividend": "股息", "buyback": "回购",
-    "cloud": "云业务", "AI": "人工智能", "software": "软件", "subscription": "订阅", "demand": "需求", "growth": "增长",
-}
+# Chinese translation/deep-translator support was removed for speed.
+# These tiny compatibility helpers let the existing UI code stay unchanged.
 
 def lang_code():
-    return st.session_state.get("lang_code", "en")
+    return "en"
 
 def tr(text):
-    if lang_code() != "zh":
-        return text
-    return ZH.get(str(text).strip(), text)
+    return text
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def translate_text_optional(text, target_lang="zh"):
-    text = clean_text(text or "") if 'clean_text' in globals() else (text or "")
-    if not text or target_lang != "zh":
-        return text
-    try:
-        from deep_translator import GoogleTranslator
-        translated = GoogleTranslator(source="auto", target="zh-CN").translate(text[:4500])
-        if translated:
-            return translated
-    except Exception:
-        pass
-    out = text
-    for en, zh in sorted(FIN_GLOSSARY.items(), key=lambda x: -len(x[0])):
-        out = re.sub(rf"\b{re.escape(en)}\b", zh, out, flags=re.I)
-    return out
+def translate_text_optional(text, target_lang="en"):
+    return text or ""
 
-try:
-    from streamlit.delta_generator import DeltaGenerator
-    _orig_metric = DeltaGenerator.metric
-    def _metric_translated(self, label, value, delta=None, *args, **kwargs):
-        return _orig_metric(self, tr(label), value, delta, *args, **kwargs)
-    DeltaGenerator.metric = _metric_translated
-except Exception:
-    pass
 
 MA_COLORS = {
     "MA5":  "#f8fafc",  # default white
@@ -571,6 +384,9 @@ def _secret_or_env_bool(name, default=False):
 SMARTSTOCK_FAST_MODE = not _secret_or_env_bool("SMARTSTOCK_DEEP_FMP", default=False)
 FMP_TIMEOUT_SECONDS = float(_os.environ.get("SMARTSTOCK_FMP_TIMEOUT", "10"))
 FMP_RAW_CACHE_TTL = int(_os.environ.get("SMARTSTOCK_FMP_RAW_CACHE_TTL", "3600"))
+# Realized risk metrics should not silently depend on a stale hard-coded
+# treasury rate. Set SMARTSTOCK_RISK_FREE_RATE=0.045 for 4.5%, etc.
+RISK_FREE_ANNUAL_RATE = float(_os.environ.get("SMARTSTOCK_RISK_FREE_RATE", "0.00"))
 _FMP_V4_BASE = "https://financialmodelingprep.com/api/v4"
 
 @st.cache_resource(show_spinner=False)
@@ -821,6 +637,60 @@ def _parse_range_high_low(range_value):
     return None, None
 
 
+def _estimate_row_date(row):
+    """Best-effort date parser for analyst-estimate rows."""
+    for key in ("date", "fiscalDateEnding", "calendarDate", "periodEndDate"):
+        val = (row or {}).get(key)
+        if val not in (None, ""):
+            try:
+                dt = pd.to_datetime(val, errors="coerce")
+                if pd.notna(dt):
+                    return dt.tz_localize(None) if getattr(dt, "tzinfo", None) else dt
+            except Exception:
+                pass
+    # calendarYear alone is less precise; place it at fiscal-year end.
+    y = _num((row or {}).get("calendarYear"), (row or {}).get("year"), default=None)
+    if y:
+        try:
+            return pd.Timestamp(int(y), 12, 31)
+        except Exception:
+            pass
+    return pd.NaT
+
+
+def _select_forward_estimate_record(rows, metric_keys=("estimatedEpsAvg", "epsAvg", "epsAverage")):
+    """Select the most appropriate forward analyst-estimate row.
+
+    FMP can return multiple annual/quarterly estimate rows. For Forward EPS we
+    want the nearest future fiscal period, not an arbitrary older or far-future
+    row. If no future-dated estimate exists, use the newest row with a usable
+    EPS estimate.
+    """
+    usable = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if _num(*(row.get(k) for k in metric_keys), default=None) is None:
+            continue
+        dt = _estimate_row_date(row)
+        usable.append((dt, row))
+    if not usable:
+        return {}
+
+    today = pd.Timestamp.today().normalize()
+    future = [(dt, row) for dt, row in usable if pd.notna(dt) and dt >= today]
+    if future:
+        future.sort(key=lambda x: x[0])
+        return future[0][1]
+
+    dated = [(dt, row) for dt, row in usable if pd.notna(dt)]
+    if dated:
+        dated.sort(key=lambda x: x[0], reverse=True)
+        return dated[0][1]
+
+    return usable[0][1]
+
+
 def _merge_nonempty(target, updates):
     for k, v in (updates or {}).items():
         if v is None or v == "" or (isinstance(v, float) and not np.isfinite(v)):
@@ -833,49 +703,58 @@ def _merge_nonempty(target, updates):
 
 
 def _normalize_ohlcv(df):
+    """Normalize FMP price rows to OHLCV.
+
+    If FMP returns adjusted columns, prefer them for the canonical OHLC fields.
+    This keeps returns, moving averages, risk, and backtests split-adjusted when
+    adjusted prices are available. If only adjClose is available, Close uses it
+    while Open/High/Low remain the raw fields; this is still safer for return
+    math than mixing old split-unadjusted closes into performance metrics.
+    """
     if df is None or df.empty:
         return pd.DataFrame()
-    out = df.copy()
+    raw = df.copy()
 
-    # FMP stable light can return label/date and price instead of close.
-    rename_map = {
-        "date": "date", "label": "date",
-        "open": "Open", "adjOpen": "Open",
-        "high": "High", "adjHigh": "High",
-        "low": "Low", "adjLow": "Low",
-        "close": "Close", "adjClose": "Close", "price": "Close",
-        "volume": "Volume",
-    }
-    out = out.rename(columns={k: v for k, v in rename_map.items() if k in out.columns})
+    # Preserve adjusted close separately for future diagnostics.
+    out = pd.DataFrame(index=raw.index)
 
-    # Renaming can intentionally map multiple FMP aliases to one canonical
-    # column, e.g. both ``close`` and ``price`` -> ``Close`` or ``date`` and
-    # ``label`` -> ``date``. Combine duplicates by taking the first non-null
-    # value row-wise so mixed endpoint shapes do not break numeric conversion.
-    if out.columns.duplicated().any():
-        combined = pd.DataFrame(index=out.index)
-        for col in dict.fromkeys(list(out.columns)):
-            block = out.loc[:, out.columns == col]
-            if isinstance(block, pd.DataFrame) and block.shape[1] > 1:
-                combined[col] = block.bfill(axis=1).iloc[:, 0]
-            elif isinstance(block, pd.DataFrame):
-                combined[col] = block.iloc[:, 0]
-            else:
-                combined[col] = block
-        out = combined
+    def pick(*cols):
+        vals = []
+        for c in cols:
+            if c in raw.columns:
+                vals.append(raw[c])
+        if not vals:
+            return None
+        block = pd.concat(vals, axis=1)
+        return block.bfill(axis=1).iloc[:, 0]
+
+    date_col = pick("date", "label")
+    if date_col is not None:
+        out["date"] = pd.to_datetime(date_col, errors="coerce")
+    elif isinstance(raw.index, pd.DatetimeIndex):
+        out.index = raw.index
+    else:
+        return pd.DataFrame()
+
+    # Prefer adjusted OHLC when provided. FMP stable stock full commonly returns
+    # adjClose; some historical/legacy shapes also include adjusted OHLC aliases.
+    out["Open"] = pick("adjOpen", "adjustedOpen", "open", "Open")
+    out["High"] = pick("adjHigh", "adjustedHigh", "high", "High")
+    out["Low"] = pick("adjLow", "adjustedLow", "low", "Low")
+    out["Close"] = pick("adjClose", "adjustedClose", "close", "price", "Close")
+    out["Volume"] = pick("volume", "Volume")
+    adj_close = pick("adjClose", "adjustedClose")
+    if adj_close is not None:
+        out["Adj Close"] = adj_close
 
     if "date" in out.columns:
-        out["date"] = pd.to_datetime(out["date"], errors="coerce")
         out = out.dropna(subset=["date"]).set_index("date")
-    elif not isinstance(out.index, pd.DatetimeIndex):
-        return pd.DataFrame()
-
     out = out.sort_index()
-    if "Close" not in out.columns:
+
+    if "Close" not in out.columns or out["Close"].isna().all():
         return pd.DataFrame()
 
-    # Fill OHLC if the endpoint only gave a close/price series.
-    for col in ("Open", "High", "Low"):
+    for col in ["Open", "High", "Low"]:
         if col not in out.columns:
             out[col] = out["Close"]
     if "Volume" not in out.columns:
@@ -883,14 +762,15 @@ def _normalize_ohlcv(df):
 
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
-    # Light endpoints may provide only Close/price for some rows. Preserve the
-    # series by filling missing OHLC values from Close instead of dropping rows.
     for col in ["Open", "High", "Low"]:
         out[col] = out[col].fillna(out["Close"])
     out["Volume"] = out["Volume"].fillna(0)
 
-    return out[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
-
+    cols = ["Open", "High", "Low", "Close", "Volume"]
+    if "Adj Close" in out.columns:
+        out["Adj Close"] = pd.to_numeric(out["Adj Close"], errors="coerce")
+        cols.append("Adj Close")
+    return out[cols].dropna(subset=["Close"])
 
 def _resample_ohlcv(df, rule):
     """Resample daily OHLCV data to weekly/monthly bars for yfinance-style intervals."""
@@ -1198,9 +1078,10 @@ def _fmp_build_info(ticker):
         ])
 
         pe = N(km.get("peRatioTTM"), ratios.get("priceEarningsRatioTTM"), km.get("peRatio"), ratios.get("priceEarningsRatio"), info.get("trailingPE"), default=None)
-        # Forward P/E must not fall back to trailing P/E/TTM P/E; if FMP does not
-        # provide it directly, it is reconstructed later from current price / forward EPS.
-        fpe = N(km.get("forwardPERatioTTM"), km.get("forwardPE"), quote.get("forwardPE"), default=None)
+        # Forward P/E must not fall back to trailing P/E/TTM P/E. It is only
+        # trusted if a direct forward P/E field exists, otherwise reconstructed
+        # later from current price / selected Forward EPS.
+        fpe = N(quote.get("forwardPE"), quote.get("forwardPe"), default=None)
         ps = N(km.get("priceToSalesRatioTTM"), ratios.get("priceToSalesRatioTTM"), km.get("priceToSalesRatio"), ratios.get("priceToSalesRatio"), default=None)
         pb = N(km.get("pbRatioTTM"), km.get("priceToBookRatioTTM"), ratios.get("priceToBookRatioTTM"), km.get("pbRatio"), km.get("priceToBookRatio"), ratios.get("priceBookValueRatio"), default=None)
         peg = N(km.get("pegRatioTTM"), km.get("pegRatio"), ratios.get("priceEarningsToGrowthRatioTTM"), ratios.get("pegRatio"), default=None)
@@ -1296,8 +1177,29 @@ def _fmp_build_info(ticker):
         if fcf is None and ocf is not None and capex is not None:
             fcf = ocf + capex
 
-        revenue_growth = (rev_now - rev_prev) / abs(rev_prev) if rev_now is not None and rev_prev not in (None, 0) else None
-        earnings_growth = (eps_now - eps_prev) / abs(eps_prev) if eps_now is not None and eps_prev not in (None, 0) else None
+        # Prefer FMP's own growth endpoint. Manual growth fallback only compares
+        # like-for-like annual rows, otherwise latest TTM vs old annual rows can
+        # produce misleading growth rates.
+        revenue_growth = P(growth.get("revenueGrowth"), growth.get("growthRevenue"), growth.get("growthRevenueTTM"))
+        earnings_growth = P(growth.get("epsgrowth"), growth.get("epsGrowth"), growth.get("growthEPS"), growth.get("growthEPSDiluted"))
+        if revenue_growth is None and len(income_annual) > 1:
+            a0, a1 = income_annual[0], income_annual[1]
+            r0, r1 = N(a0.get("revenue"), default=None), N(a1.get("revenue"), default=None)
+            revenue_growth = (r0 - r1) / abs(r1) if r0 is not None and r1 not in (None, 0) else None
+        if earnings_growth is None and len(income_annual) > 1:
+            a0, a1 = income_annual[0], income_annual[1]
+            e0 = N(a0.get("eps"), a0.get("epsdiluted"), a0.get("epsDiluted"), default=None)
+            e1 = N(a1.get("eps"), a1.get("epsdiluted"), a1.get("epsDiluted"), default=None)
+            earnings_growth = (e0 - e1) / abs(e1) if e0 is not None and e1 not in (None, 0) else None
+        if revenue_growth is None and len(income_quarter) > 4:
+            q0, q4 = income_quarter[0], income_quarter[4]
+            r0, r4 = N(q0.get("revenue"), default=None), N(q4.get("revenue"), default=None)
+            revenue_growth = (r0 - r4) / abs(r4) if r0 is not None and r4 not in (None, 0) else None
+        if earnings_growth is None and len(income_quarter) > 4:
+            q0, q4 = income_quarter[0], income_quarter[4]
+            e0 = N(q0.get("eps"), q0.get("epsdiluted"), q0.get("epsDiluted"), default=None)
+            e4 = N(q4.get("eps"), q4.get("epsdiluted"), q4.get("epsDiluted"), default=None)
+            earnings_growth = (e0 - e4) / abs(e4) if e0 is not None and e4 not in (None, 0) else None
 
         book_value_per_share = N(km.get("bookValuePerShareTTM"), km.get("bookValuePerShare"), ratios.get("bookValuePerShare"), default=None)
         if book_value_per_share is None and total_equity is not None and shares not in (None, 0):
@@ -1309,8 +1211,8 @@ def _fmp_build_info(ticker):
             "ebitda": ebitda,
             "trailingEps": eps_now,
             "forwardEps": N(quote.get("epsEstimatedNextYear"), quote.get("forwardEps"), km.get("estimatedEpsAvg"), default=None),
-            "revenueGrowth": revenue_growth if revenue_growth is not None else P(growth.get("revenueGrowth"), growth.get("growthRevenue"), growth.get("growthRevenueTTM")),
-            "earningsGrowth": earnings_growth if earnings_growth is not None else P(growth.get("epsgrowth"), growth.get("epsGrowth"), growth.get("growthEPS"), growth.get("growthEPSDiluted")),
+            "revenueGrowth": revenue_growth,
+            "earningsGrowth": earnings_growth,
             "totalDebt": total_debt,
             "totalCash": total_cash,
             "bookValue": book_value_per_share,
@@ -1389,13 +1291,18 @@ def _fmp_build_info(ticker):
             (f"price-target-consensus/{sym}", {}, "v3"),
             ("price-target-summary", {"symbol": sym}, "stable"),
         ])
-        analyst_est = merge_records([
+        analyst_est_rows_annual = rows_all([
             # Stable docs require symbol + period + page + limit. Keep v3 as a fallback.
             ("analyst-estimates", {"symbol": sym, "period": "annual", "page": 0, "limit": 10}, "stable"),
-            ("analyst-estimates", {"symbol": sym, "period": "quarter", "page": 0, "limit": 10}, "stable"),
             (f"analyst-estimates/{sym}", {"period": "annual", "limit": 10}, "v3"),
+        ], stop_after_first=False, latest_only=False)
+        analyst_est_rows_quarter = rows_all([
+            ("analyst-estimates", {"symbol": sym, "period": "quarter", "page": 0, "limit": 10}, "stable"),
             (f"analyst-estimates/{sym}", {"period": "quarter", "limit": 10}, "v3"),
-        ])
+        ], stop_after_first=False, latest_only=False)
+        # Use annual Forward EPS first; quarter estimates are a fallback only.
+        analyst_est = (_select_forward_estimate_record(analyst_est_rows_annual)
+                       or _select_forward_estimate_record(analyst_est_rows_quarter))
         rec_rows = rows_all([
             # Current stable analyst-rating consensus endpoint.
             ("grades-consensus", {"symbol": sym}, "stable"),
@@ -1470,7 +1377,7 @@ def _fmp_build_info(ticker):
             ni = N(info.get("netIncomeToCommon"), default=None)
             if div_paid is not None and ni not in (None, 0) and ni > 0:
                 info["payoutRatio"] = abs(div_paid) / ni
-            elif info.get("dividendYield") not in (None, 0) and price not in (None, 0) and info.get("trailingEps") not in (None, 0):
+            elif info.get("dividendYield") not in (None, 0) and price not in (None, 0) and info.get("trailingEps") not in (None, 0) and info.get("trailingEps") > 0:
                 info["payoutRatio"] = (info["dividendYield"] * price) / info["trailingEps"]
         if info.get("trailingPE") is None and price not in (None, 0) and info.get("trailingEps") not in (None, 0):
             info["trailingPE"] = price / info["trailingEps"]
@@ -1510,6 +1417,24 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
         except Exception:
             return {}
 
+    def merge_one(attempts, latest_only=True):
+        merged = {}
+        for endpoint, params, base in attempts:
+            try:
+                rows = _records(_fmp_get(endpoint, params or {}, base=base))
+                if latest_only:
+                    rows = rows[:1]
+                for row in rows:
+                    for k, v in (row or {}).items():
+                        if v is None or v == "" or str(v).lower() in {"nan", "none", "null"}:
+                            continue
+                        if k in merged and merged[k] not in (None, "", 0, 0.0) and v in (0, 0.0, "0", "0.0"):
+                            continue
+                        merged[k] = v
+            except Exception:
+                continue
+        return merged
+
     def set_missing(k, *vals, pctval=False):
         if info.get(k) not in (None, "", 0, 0.0):
             return
@@ -1517,25 +1442,34 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
         if v not in (None, ""):
             info[k] = v
 
-    q = one(f"quote/{sym}", {}, "v3") or one("quote", {"symbol": sym}, "stable")
-    prof = one(f"profile/{sym}", {}, "v3") or one("profile", {"symbol": sym}, "stable")
-    km = one(f"key-metrics-ttm/{sym}", {}, "v3") or one("key-metrics-ttm", {"symbol": sym}, "stable")
-    rt = one(f"ratios-ttm/{sym}", {}, "v3") or one("ratios-ttm", {"symbol": sym}, "stable") or one("metrics-ratios-ttm", {"symbol": sym}, "stable")
-    inc = one(f"income-statement-ttm/{sym}", {}, "v3") or one("income-statement-ttm", {"symbol": sym}, "stable") or one(f"income-statement/{sym}", {"limit": 1}, "v3")
-    bal = one(f"balance-sheet-statement/{sym}", {"limit": 1, "period": "quarter"}, "v3") or one(f"balance-sheet-statement/{sym}", {"limit": 1}, "v3") or one("balance-sheet-statement", {"symbol": sym, "limit": 1, "period": "quarter"}, "stable")
-    cf = one(f"cash-flow-statement-ttm/{sym}", {}, "v3") or one("cash-flow-statement-ttm", {"symbol": sym}, "stable") or one(f"cash-flow-statement/{sym}", {"limit": 1}, "v3")
-    gr = one(f"financial-growth/{sym}", {"limit": 1}, "v3") or one("financial-growth", {"symbol": sym, "limit": 1}, "stable")
-    ae = (
-        one("analyst-estimates", {"symbol": sym, "period": "annual", "page": 0, "limit": 10}, "stable")
-        or one("analyst-estimates", {"symbol": sym, "period": "quarter", "page": 0, "limit": 10}, "stable")
-        or one(f"analyst-estimates/{sym}", {"period": "annual", "limit": 10}, "v3")
-        or one(f"analyst-estimates/{sym}", {"period": "quarter", "limit": 10}, "v3")
-    )
-    evrow = one("enterprise-values", {"symbol": sym, "limit": 1}, "stable") or one(f"enterprise-values/{sym}", {"limit": 1}, "v3")
-    share_float_row = one("shares-float", {"symbol": sym}, "stable") or one("shares_float", {"symbol": sym}, "v4") or one(f"shares_float/{sym}", {}, "v4")
-    short_row = one("short_interest", {"symbol": sym, "limit": 1}, "v4") or one(f"short_interest/{sym}", {"limit": 1}, "v4")
-    recrow = one("grades-consensus", {"symbol": sym}, "stable") or one(f"analyst-stock-recommendations/{sym}", {"limit": 5}, "v3")
-    targetrow = one("price-target-consensus", {"symbol": sym}, "stable") or one("price-target-summary", {"symbol": sym}, "stable")
+    q = merge_one([(f"quote/{sym}", {}, "v3"), ("quote", {"symbol": sym}, "stable"), ("quote-short", {"symbol": sym}, "stable")])
+    prof = merge_one([(f"profile/{sym}", {}, "v3"), ("profile", {"symbol": sym}, "stable")])
+    km = merge_one([(f"key-metrics-ttm/{sym}", {}, "v3"), ("key-metrics-ttm", {"symbol": sym}, "stable")])
+    rt = merge_one([(f"ratios-ttm/{sym}", {}, "v3"), ("ratios-ttm", {"symbol": sym}, "stable"), ("metrics-ratios-ttm", {"symbol": sym}, "stable")])
+    inc = merge_one([(f"income-statement-ttm/{sym}", {}, "v3"), ("income-statement-ttm", {"symbol": sym}, "stable"), (f"income-statement/{sym}", {"limit": 1}, "v3")])
+    bal = merge_one([(f"balance-sheet-statement/{sym}", {"limit": 1, "period": "quarter"}, "v3"), (f"balance-sheet-statement/{sym}", {"limit": 1}, "v3"), ("balance-sheet-statement", {"symbol": sym, "limit": 1, "period": "quarter"}, "stable")])
+    cf = merge_one([(f"cash-flow-statement-ttm/{sym}", {}, "v3"), ("cash-flow-statement-ttm", {"symbol": sym}, "stable"), (f"cash-flow-statement/{sym}", {"limit": 1}, "v3")])
+    gr = merge_one([(f"financial-growth/{sym}", {"limit": 1}, "v3"), ("financial-growth", {"symbol": sym, "limit": 1}, "stable")])
+
+    ae_annual_rows = []
+    ae_quarter_rows = []
+    for endpoint, params, base in [
+        ("analyst-estimates", {"symbol": sym, "period": "annual", "page": 0, "limit": 10}, "stable"),
+        (f"analyst-estimates/{sym}", {"period": "annual", "limit": 10}, "v3"),
+    ]:
+        ae_annual_rows.extend(_records(_fmp_get(endpoint, params, base=base)) or [])
+    for endpoint, params, base in [
+        ("analyst-estimates", {"symbol": sym, "period": "quarter", "page": 0, "limit": 10}, "stable"),
+        (f"analyst-estimates/{sym}", {"period": "quarter", "limit": 10}, "v3"),
+    ]:
+        ae_quarter_rows.extend(_records(_fmp_get(endpoint, params, base=base)) or [])
+    ae = _select_forward_estimate_record(ae_annual_rows) or _select_forward_estimate_record(ae_quarter_rows)
+
+    evrow = merge_one([("enterprise-values", {"symbol": sym, "limit": 1}, "stable"), (f"enterprise-values/{sym}", {"limit": 1}, "v3")])
+    share_float_row = merge_one([("shares-float", {"symbol": sym}, "stable"), ("shares_float", {"symbol": sym}, "v4"), (f"shares_float/{sym}", {}, "v4")])
+    short_row = merge_one([("short-interest", {"symbol": sym, "limit": 4}, "stable"), ("short_interest", {"symbol": sym, "limit": 1}, "v4"), (f"short_interest/{sym}", {"limit": 1}, "v4")])
+    recrow = merge_one([("grades-consensus", {"symbol": sym}, "stable"), (f"analyst-stock-recommendations/{sym}", {"limit": 5}, "v3")])
+    targetrow = merge_one([("price-target-consensus", {"symbol": sym}, "stable"), ("price-target-summary", {"symbol": sym}, "stable")])
 
     hi, lo = _parse_range_high_low(prof.get("range"))
     set_missing("regularMarketPrice", q.get("price"), prof.get("price"))
@@ -1560,7 +1494,7 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
     set_missing("trailingPE", q.get("pe"), q.get("peRatio"), prof.get("pe"), km.get("peRatioTTM"), rt.get("priceEarningsRatioTTM"))
     # Do not use trailing/TTM P/E as Forward P/E. If direct forward P/E is missing,
     # reconstruct it later from current price and forward EPS.
-    set_missing("forwardPE", q.get("forwardPE"), km.get("forwardPERatioTTM"), km.get("forwardPE"))
+    set_missing("forwardPE", q.get("forwardPE"), q.get("forwardPe"))
     set_missing("pegRatio", km.get("pegRatioTTM"), rt.get("priceEarningsToGrowthRatioTTM"))
     set_missing("priceToSalesTrailing12Months", km.get("priceToSalesRatioTTM"), rt.get("priceToSalesRatioTTM"))
     set_missing("priceToBook", km.get("pbRatioTTM"), km.get("priceToBookRatioTTM"), rt.get("priceToBookRatioTTM"))
@@ -1585,7 +1519,7 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
         price_for_payout = n(info.get("regularMarketPrice"), q.get("price"), prof.get("price"), default=None)
         if div_paid is not None and ni not in (None, 0) and ni > 0:
             info["payoutRatio"] = abs(div_paid) / ni
-        elif div_yield not in (None, 0) and price_for_payout not in (None, 0) and eps_for_payout not in (None, 0):
+        elif div_yield not in (None, 0) and price_for_payout not in (None, 0) and eps_for_payout not in (None, 0) and eps_for_payout > 0:
             info["payoutRatio"] = (div_yield * price_for_payout) / eps_for_payout
     de = n(rt.get("debtEquityRatioTTM"), rt.get("debtToEquityRatioTTM"), km.get("debtToEquityTTM"), default=None)
     if info.get("debtToEquity") in (None, "", 0, 0.0) and de is not None:
@@ -2150,17 +2084,29 @@ def calc_ta(df):
     df["RVOL60"] = df["RET"].rolling(60, min_periods=60).std() * np.sqrt(252) * 100
     return df
 def find_sr(df, window=15, n=3):
-    c = df["Close"].values
+    if df is None or df.empty or "Close" not in df.columns:
+        return [], []
+    close = pd.to_numeric(df["Close"], errors="coerce").dropna()
+    if len(close) < max(3, window * 2 + 1):
+        return [], []
+    c = close.values
     highs, lows = [], []
     for i in range(window, len(c) - window):
         seg = c[i-window:i+window+1]
-        if c[i] == seg.max(): highs.append(float(c[i]))
-        if c[i] == seg.min(): lows.append(float(c[i]))
+        if len(seg) and c[i] == np.nanmax(seg):
+            highs.append(float(c[i]))
+        if len(seg) and c[i] == np.nanmin(seg):
+            lows.append(float(c[i]))
     def cluster(pts, tol=0.01):
-        if not pts: return []
-        pts = sorted(set(pts)); out = [pts[0]]
+        pts = [p for p in pts if np.isfinite(p) and p > 0]
+        if not pts:
+            return []
+        pts = sorted(set(pts))
+        out = [pts[0]]
         for p in pts[1:]:
-            if (p-out[-1])/out[-1] > tol: out.append(p)
+            base = out[-1]
+            if base <= 0 or (p - base) / base > tol:
+                out.append(p)
         return out
     cur = float(c[-1])
     return (sorted([x for x in cluster(lows)  if x < cur], reverse=True)[:n],
@@ -2209,7 +2155,7 @@ def calc_risk(hist, spy):
         r = ret_s.to_numpy(dtype=float)
         b = np.zeros_like(r)
 
-    rf = 0.053 / 252
+    rf = float(RISK_FREE_ANNUAL_RATE) / 252
     std_r = float(np.std(r, ddof=1)) if len(r) > 1 else 0.0
     std_b = float(np.std(b, ddof=1)) if len(b) > 1 else 0.0
     beta = float(np.cov(r, b, ddof=1)[0, 1] / np.var(b, ddof=1)) if len(r) > 2 and np.var(b, ddof=1) else 0.0
@@ -2985,8 +2931,8 @@ def render_news_item(n):
     link = n.get("link", "")
     raw_title = n.get("title", "Untitled")
     raw_summary = n.get("summary", "")
-    title = html.escape(translate_text_optional(raw_title, lang_code()) if lang_code() == "zh" else raw_title)
-    summary = html.escape(translate_text_optional(raw_summary, lang_code()) if lang_code() == "zh" else raw_summary)
+    title = html.escape(raw_title)
+    summary = html.escape(raw_summary)
     publisher = html.escape(n.get("publisher", "News"))
     url_html = f'<a href="{html.escape(link)}" target="_blank" style="color:#60a5fa;text-decoration:none">{tr("Open source")} ↗</a>' if link else ""
     body = f'''
@@ -3310,9 +3256,9 @@ def render_market_news_item(n):
     sentiment = n.get("sentiment", "Mixed / Watch")
     cls = "news-positive" if sentiment == "Positive" else "news-negative" if sentiment == "Negative" else "news-neutral"
     title_raw = n.get("ai_title") or n.get("title", "Market update")
-    title = html.escape(translate_text_optional(title_raw, lang_code()) if lang_code() == "zh" else title_raw)
+    title = html.escape(title_raw)
     summary_raw = n.get("ai_summary", "")
-    summary = html.escape(translate_text_optional(summary_raw, lang_code()) if lang_code() == "zh" else summary_raw)
+    summary = html.escape(summary_raw)
     publisher = html.escape(n.get("publisher", "News")); category = html.escape(tr(n.get("category", "General Market News"))); country = html.escape(tr(n.get("country", "Global")))
     score = int(n.get("importance", 0)); impact = n.get("impact", {}) or {}
     good = html.escape("; ".join(impact.get("good_for", [])[:4])); bad = html.escape("; ".join(impact.get("bad_for", [])[:4])); watch = html.escape("; ".join(impact.get("watch", [])[:4]))
@@ -6218,7 +6164,7 @@ def main():
 
     # ── Sidebar ────────────────────────────────────────────────────
     with st.sidebar:
-        # Professional static product header first; language selector sits below it.
+        # Professional static product header.
         st.markdown("""
         <div style="padding:0.45rem 0 0.75rem;border-bottom:1px solid #1f2937;margin-bottom:0.65rem;">
           <div style="font-size:18px;font-weight:760;color:#e5e7eb;letter-spacing:-0.025em;line-height:1.12;">
@@ -6226,9 +6172,6 @@ def main():
           <div style="font-size:9px;color:#64748b;margin-top:5px;letter-spacing:0.12em;font-weight:650;">
             EQUITY RESEARCH · RISK · NEWS</div>
         </div>""", unsafe_allow_html=True)
-
-        lang_choice = st.selectbox("Language / 语言", list(LANG_OPTIONS.keys()), index=0, key="language_select")
-        st.session_state["lang_code"] = LANG_OPTIONS.get(lang_choice, "en")
 
         if "ticker" not in st.session_state:
             st.session_state.ticker = "AAPL"
@@ -6393,6 +6336,8 @@ def main():
         with st.expander("Data / disclaimer", expanded=False):
             st.markdown('<div style="font-size:10px;color:#334155;line-height:1.7">'
                         'Price data: FMP API<br>Indicators: ta library<br>'
+                        f'Risk-free rate for Sharpe/alpha: {RISK_FREE_ANNUAL_RATE:.2%} '
+                        '(set SMARTSTOCK_RISK_FREE_RATE to change)<br>'
                         'AI Thesis: built-in rule engine<br>⚠️ Not financial advice.</div>',
                         unsafe_allow_html=True)
 
@@ -6857,8 +6802,8 @@ def main():
         h4.metric("Free Cash Flow",fmtn(info.get("freeCashflow"),"$"))
         h5.metric("Total Debt",    fmtn(info.get("totalDebt"),"$"))
         h6.metric("Total Cash",    fmtn(info.get("totalCash"),"$"))
-        ebitda=info.get("ebitda") or 0; intexp=info.get("interestExpense") or 0
-        h7.metric("Int. Coverage", f"{ebitda/max(intexp,1):.1f}x" if ebitda and intexp else "—")
+        ebitda=info.get("ebitda") or 0; intexp=abs(info.get("interestExpense") or 0)
+        h7.metric("Int. Coverage", f"{ebitda/intexp:.1f}x" if ebitda and intexp else "—")
 
         page_comment("Reading this page", ["<b>Sharpe ratio:</b> above 1 is generally good; above 2 is strong; below 0 means risk-adjusted return is poor over the selected period.", "<b>Beta:</b> above 1 moves more than SPY on average; below 1 is usually more defensive.", "<b>Max drawdown:</b> shows worst peak-to-trough loss; smaller drawdown is better for capital preservation.", "<b>VaR / CVaR:</b> estimate downside tail risk; CVaR is the average loss in the worst tail, so it is usually more conservative."])
 
@@ -7086,7 +7031,7 @@ def main():
                 st.dataframe(comparison_table(comp1, i1, rsk1, ta1, comp2, i2, rsk2, ta2), use_container_width=True)
 
                 shead("Built-in AI-Style Comparison Summary")
-                st.markdown(f'<div style="font-size:14px;color:#94a3b8;line-height:1.8">{translate_text_optional(comparison_paragraph(comp1, i1, rsk1, ta1, comp2, i2, rsk2, ta2), lang_code()) if lang_code()=="zh" else comparison_paragraph(comp1, i1, rsk1, ta1, comp2, i2, rsk2, ta2)}</div>', unsafe_allow_html=True)
+                st.markdown(f'<div style="font-size:14px;color:#94a3b8;line-height:1.8">{comparison_paragraph(comp1, i1, rsk1, ta1, comp2, i2, rsk2, ta2)}</div>', unsafe_allow_html=True)
 
         page_comment("Reading this page", ["<b>Direct comparison:</b> a better candidate usually has stronger trend, lower valuation risk, better profitability, and acceptable volatility.", "<b>Volatility:</b> the more volatile ticker may offer better trading opportunity but needs stricter risk control.", "<b>Ratios:</b> compare against the firm’s industry average, not only against the second ticker."])
 
