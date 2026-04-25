@@ -5982,6 +5982,126 @@ def _ranking_note(pct, vol20, vol_ratio):
     if vol20 > 55: return "High volatility; suitable for active trading but position size should be smaller."
     if abs(pct) < 0.5 and vol20 < 25: return "Stable move; better for trend confirmation than short-term momentum."
     return "Moderate move; compare with sector and volume confirmation."
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def ranking_snapshot(tickers_tuple, period="3mo"):
+    """Build the Market Rankings table without crashing when the ranking tab loads.
+
+    Returns the exact columns consumed by the Market Rankings UI:
+    price change, 5-day momentum, opening gap, realized volatility, volume
+    confirmation, dollar volume, liquidity score, and trader composite score.
+    The function is cached and intentionally bounded so it does not hammer FMP
+    on every Streamlit rerun.
+    """
+    rows = []
+    for t in tickers_tuple:
+        try:
+            ticker = str(t or "").upper().strip()
+            if not ticker:
+                continue
+
+            y = _fmp_ticker(ticker)
+            h = y.history(period=period, auto_adjust=True)
+            if h is None or h.empty or "Close" not in h.columns or len(h) < 2:
+                continue
+
+            close = pd.to_numeric(h["Close"], errors="coerce").dropna()
+            if len(close) < 2:
+                continue
+
+            last = float(close.iloc[-1])
+            prev = float(close.iloc[-2])
+            if not np.isfinite(last) or not np.isfinite(prev) or prev == 0:
+                continue
+
+            chg = last - prev
+            pct = (last / prev - 1.0) * 100.0
+
+            ret = close.pct_change().dropna()
+            vol20 = float(ret.tail(20).std() * np.sqrt(252) * 100.0) if len(ret) >= 2 else 0.0
+            if not np.isfinite(vol20):
+                vol20 = 0.0
+
+            if "Volume" in h.columns:
+                vol_series = pd.to_numeric(h["Volume"], errors="coerce").dropna()
+            else:
+                vol_series = pd.Series(dtype=float)
+            latest_volume = float(vol_series.iloc[-1]) if len(vol_series) else 0.0
+            avg_volume_20 = float(vol_series.tail(20).mean()) if len(vol_series) >= 5 else 0.0
+            vol_ratio = float(latest_volume / avg_volume_20) if avg_volume_20 > 0 else 0.0
+            if not np.isfinite(vol_ratio):
+                vol_ratio = 0.0
+
+            if len(close) >= 6 and close.iloc[-6] != 0:
+                momentum_5d = float((close.iloc[-1] / close.iloc[-6] - 1.0) * 100.0)
+            else:
+                momentum_5d = pct
+            if not np.isfinite(momentum_5d):
+                momentum_5d = 0.0
+
+            gap_pct = 0.0
+            try:
+                if "Open" in h.columns and len(h) >= 2 and prev != 0:
+                    open_series = pd.to_numeric(h["Open"], errors="coerce").dropna()
+                    if len(open_series):
+                        last_open = float(open_series.iloc[-1])
+                        gap_pct = (last_open / prev - 1.0) * 100.0 if np.isfinite(last_open) else 0.0
+            except Exception:
+                gap_pct = 0.0
+
+            try:
+                info = y.get_info()
+            except Exception:
+                info = {}
+
+            market_cap = float(safe_float(info.get("marketCap"), 0.0))
+            dollar_volume = float(last * latest_volume) if latest_volume > 0 else 0.0
+
+            # Liquidity score is based on dollar volume. Values around $1B+ daily
+            # approach 100, while thin names remain low.
+            liquidity_score = 0.0
+            if dollar_volume > 0:
+                liquidity_score = min(100.0, max(0.0, np.log10(max(dollar_volume, 1.0)) * 12.5 - 50.0))
+
+            trader_score = (
+                abs(pct) * 1.8
+                + vol20 * 0.20
+                + vol_ratio * 7.0
+                + abs(momentum_5d) * 0.8
+                + liquidity_score * 0.15
+            )
+            if not np.isfinite(trader_score):
+                trader_score = 0.0
+
+            rows.append({
+                "Ticker": ticker,
+                "Company": str(info.get("shortName") or info.get("longName") or ticker)[:42],
+                "Country": info.get("country") or "Unknown",
+                "Sector": info.get("sector") or "Unknown",
+                "Industry": info.get("industry") or "Unknown",
+                "Market Cap": round(market_cap, 0),
+                "Market Cap $B": round(market_cap / 1e9, 2) if market_cap else 0.0,
+                "Last Price": round(last, 2),
+                "Change $": round(chg, 2),
+                "Change %": round(pct, 2),
+                "5D Momentum %": round(momentum_5d, 2),
+                "Opening Gap %": round(gap_pct, 2),
+                "20D Vol %": round(vol20, 2),
+                "Volume Ratio": round(vol_ratio, 2),
+                "Dollar Volume $M": round(dollar_volume / 1e6, 2),
+                "Liquidity Score": round(liquidity_score, 1),
+                "Trader Composite Score": round(trader_score, 1),
+                "Investment Note": _ranking_note(pct, vol20, vol_ratio),
+            })
+        except Exception:
+            continue
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values("Trader Composite Score", ascending=False).reset_index(drop=True)
+    return df
+
 @st.cache_data(ttl=900, show_spinner=False)
 def ai_score_universe(tickers_tuple, period="1y", model="risk_loving"):
     """Score a universe with the built-in AI thesis model, grouped by reported industry."""
@@ -6291,13 +6411,13 @@ def main():
         </div>""", unsafe_allow_html=True)
 
         if "ticker" not in st.session_state:
-            st.session_state.ticker = "AAPL"
+            st.session_state.ticker = "NVDA"
 
         st.markdown(f'<div style="font-size:10px;color:#475569;text-transform:uppercase;'
                     f'letter-spacing:0.1em;margin:0.2rem 0 0.45rem">{tr("Ticker Symbol")}</div>',
                     unsafe_allow_html=True)
         ticker_input = st.text_input("Direct ticker symbol", value=st.session_state.ticker,
-                                     placeholder="AAPL, MSFT, TSLA…",
+                                     placeholder="NVDA, MSFT, TSLA…",
                                      label_visibility="collapsed",
                                      help="Type a ticker directly, or use company-name search below.").upper().strip()
         if ticker_input:
