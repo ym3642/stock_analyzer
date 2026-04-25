@@ -1825,29 +1825,6 @@ class _FMPTicker:
     def news(self):
         return _fmp_news_items(self.symbol, limit=50)
 
-    @property
-    def quarterly_financials(self):
-        return _fmp_statement_df("income-statement", self.symbol, limit=8, period="quarter")
-
-    @property
-    def financials(self):
-        return _fmp_statement_df("income-statement", self.symbol, limit=8, period="annual")
-
-    @property
-    def quarterly_balance_sheet(self):
-        return _fmp_statement_df("balance-sheet-statement", self.symbol, limit=8, period="quarter")
-
-    @property
-    def balance_sheet(self):
-        return _fmp_statement_df("balance-sheet-statement", self.symbol, limit=8, period="annual")
-
-    @property
-    def quarterly_cashflow(self):
-        return _fmp_statement_df("cash-flow-statement", self.symbol, limit=8, period="quarter")
-
-    @property
-    def cashflow(self):
-        return _fmp_statement_df("cash-flow-statement", self.symbol, limit=8, period="annual")
 
 
 def _fetch_stock_uncached(ticker, period="2y"):
@@ -1935,22 +1912,6 @@ def fetch_peers(tickers: tuple, period="1y"):
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_spy(period="2y"):
     return _fmp_ticker("SPY").history(period=period, auto_adjust=True)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_financial_reports(ticker):
-    try:
-        tk = _fmp_ticker(ticker)
-        return {
-            "Quarterly Income Statement": tk.quarterly_financials,
-            "Annual Income Statement": tk.financials,
-            "Quarterly Balance Sheet": tk.quarterly_balance_sheet,
-            "Annual Balance Sheet": tk.balance_sheet,
-            "Quarterly Cash Flow": tk.quarterly_cashflow,
-            "Annual Cash Flow": tk.cashflow,
-        }, None
-    except Exception as e:
-        return {}, str(e)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -5769,94 +5730,6 @@ def with_avg(value, metric, info=None):
     return f"{value} (ave. {f})" if f else value
 
 
-def _fmt_statement_value(x):
-    try:
-        if pd.isna(x):
-            return "—"
-        x = float(x)
-        neg = x < 0
-        ax = abs(x)
-        if ax >= 1e12:
-            out = f"${ax/1e12:,.2f}T"
-        elif ax >= 1e9:
-            out = f"${ax/1e9:,.2f}B"
-        elif ax >= 1e6:
-            out = f"${ax/1e6:,.2f}M"
-        elif ax >= 1e3:
-            out = f"${ax/1e3:,.1f}K"
-        else:
-            out = f"${ax:,.0f}"
-        return f"({out})" if neg else out
-    except Exception:
-        return "—"
-
-
-def _fmt_statement_change(x):
-    try:
-        if pd.isna(x) or np.isinf(x):
-            return "—"
-        sign = "+" if x >= 0 else ""
-        return f"{sign}{x:.1f}%"
-    except Exception:
-        return "—"
-
-
-def _statement_period_label(col):
-    try:
-        return pd.to_datetime(col).strftime("%Y-%m-%d")
-    except Exception:
-        return str(col)
-
-
-def build_statement_comparison(stmt, rows, quarterly=True):
-    """Return selected financial statement rows with latest, previous, and YoY comparisons."""
-    if stmt is None or stmt.empty:
-        return pd.DataFrame()
-    df = stmt.copy()
-    # FMP statements are converted to rows=items, columns=periods. Keep newest columns first.
-    try:
-        df = df.loc[:, sorted(df.columns, reverse=True)]
-    except Exception:
-        pass
-    available_rows = [r for r in rows if r in df.index]
-    if not available_rows:
-        # Fallback: show the first meaningful rows if labels differ by ticker/source.
-        available_rows = list(df.index[:10])
-    cols = list(df.columns)
-    if not cols:
-        return pd.DataFrame()
-    latest_col = cols[0]
-    prev_col = cols[1] if len(cols) > 1 else None
-    yoy_col = cols[4] if quarterly and len(cols) > 4 else cols[1] if (not quarterly and len(cols) > 1) else None
-    out = []
-    for r in available_rows:
-        latest = pd.to_numeric(pd.Series([df.at[r, latest_col]]), errors="coerce").iloc[0]
-        prev = pd.to_numeric(pd.Series([df.at[r, prev_col]]), errors="coerce").iloc[0] if prev_col is not None else np.nan
-        yoy = pd.to_numeric(pd.Series([df.at[r, yoy_col]]), errors="coerce").iloc[0] if yoy_col is not None else np.nan
-        prev_chg = ((latest - prev) / abs(prev) * 100) if prev not in (0, np.nan) and not pd.isna(prev) else np.nan
-        yoy_chg = ((latest - yoy) / abs(yoy) * 100) if yoy not in (0, np.nan) and not pd.isna(yoy) else np.nan
-        out.append({
-            "Line Item": str(r),
-            f"Latest ({_statement_period_label(latest_col)})": _fmt_statement_value(latest),
-            f"Previous ({_statement_period_label(prev_col)})" if prev_col is not None else "Previous": _fmt_statement_value(prev),
-            "Change vs Previous": _fmt_statement_change(prev_chg),
-            f"Same Period Last Year ({_statement_period_label(yoy_col)})" if yoy_col is not None else "Same Period Last Year": _fmt_statement_value(yoy),
-            "YoY Change": _fmt_statement_change(yoy_chg),
-        })
-    return pd.DataFrame(out)
-
-
-def render_financial_statement_table(title, stmt, rows, quarterly=True, expanded=True):
-    with st.expander(title, expanded=expanded):
-        table = build_statement_comparison(stmt, rows, quarterly=quarterly)
-        if table.empty:
-            st.info("Financial statement data is unavailable for this ticker from FMP.")
-            return
-        st.dataframe(table, use_container_width=True, hide_index=True)
-        if quarterly:
-            st.caption("Previous = prior quarter. Same period last year = same quarter one year ago when available.")
-        else:
-            st.caption("Previous = previous fiscal year. YoY Change compares the latest fiscal year with the previous fiscal year.")
 
 
 def is_intraday_interval(interval):
@@ -6555,7 +6428,6 @@ def main():
             _fmp_build_info.clear()
             calc_ta.clear()
             calc_risk.clear()
-            fetch_financial_reports.clear()
             fetch_news_items.clear()
             fetch_market_news.clear()
             fetch_spy.clear()
@@ -6938,47 +6810,7 @@ def main():
         q5.metric("Op Margin",    with_avg(fpct(info.get("operatingMargins")), "op_margin", info))
         q6.metric("Rev Growth",   with_avg(fpct(info.get("revenueGrowth")), "rev_growth", info))
 
-        shead("Financial Reports")
-        st.caption("Access the three major statements directly inside valuation. Comparisons use the newest available FMP statement data.")
-        stmt_mode = st.radio("Statement period", ["Quarterly", "Annual"], horizontal=True, index=0, key="financial_statement_mode")
-        with st.spinner(f"Loading {ticker} financial reports..."):
-            reports, reports_err = fetch_financial_reports(ticker)
-        if reports_err:
-            st.warning(f"Could not load financial reports: {reports_err}")
-        quarterly_mode = stmt_mode == "Quarterly"
-        if quarterly_mode:
-            income_stmt = reports.get("Quarterly Income Statement")
-            balance_stmt = reports.get("Quarterly Balance Sheet")
-            cash_stmt = reports.get("Quarterly Cash Flow")
-        else:
-            income_stmt = reports.get("Annual Income Statement")
-            balance_stmt = reports.get("Annual Balance Sheet")
-            cash_stmt = reports.get("Annual Cash Flow")
-
-        income_rows = [
-            "Total Revenue", "Operating Revenue", "Cost Of Revenue", "Gross Profit",
-            "Operating Expense", "Operating Income", "EBITDA", "EBIT",
-            "Interest Expense", "Pretax Income", "Tax Provision", "Net Income",
-            "Diluted EPS", "Basic EPS", "Diluted Average Shares", "Basic Average Shares"
-        ]
-        balance_rows = [
-            "Total Assets", "Current Assets", "Cash And Cash Equivalents",
-            "Cash Cash Equivalents And Short Term Investments", "Accounts Receivable",
-            "Inventory", "Total Liabilities Net Minority Interest", "Current Liabilities",
-            "Total Debt", "Net Debt", "Stockholders Equity", "Retained Earnings",
-            "Working Capital", "Tangible Book Value", "Ordinary Shares Number"
-        ]
-        cash_rows = [
-            "Operating Cash Flow", "Free Cash Flow", "Capital Expenditure",
-            "Investing Cash Flow", "Financing Cash Flow", "Repayment Of Debt",
-            "Issuance Of Debt", "Repurchase Of Capital Stock", "Cash Dividends Paid",
-            "End Cash Position", "Changes In Cash"
-        ]
-        render_financial_statement_table("Income Statement", income_stmt, income_rows, quarterly=quarterly_mode, expanded=True)
-        render_financial_statement_table("Balance Sheet", balance_stmt, balance_rows, quarterly=quarterly_mode, expanded=False)
-        render_financial_statement_table("Cash Flow Statement", cash_stmt, cash_rows, quarterly=quarterly_mode, expanded=False)
-
-        page_comment("Reading this page", ["<b>P/E, P/S, EV/EBITDA:</b> lower can be cheaper, but high-growth firms often trade above industry averages.", "<b>PEG:</b> around 1 is often reasonable; far above 2 can mean price is rich relative to growth.", "<b>DCF:</b> highly sensitive to growth, WACC, and terminal assumptions; use it as a scenario tool, not a precise target.", "<b>Financial reports:</b> revenue, net income, debt, and free cash flow trends matter more when they improve versus both the previous period and the same period last year.", "<b>ROE / margins:</b> higher usually signals stronger quality, but check debt and business cyclicality."])
+        page_comment("Reading this page", ["<b>P/E, P/S, EV/EBITDA:</b> lower can be cheaper, but high-growth firms often trade above industry averages.", "<b>PEG:</b> around 1 is often reasonable; far above 2 can mean price is rich relative to growth.", "<b>DCF:</b> highly sensitive to growth, WACC, and terminal assumptions; use it as a scenario tool, not a precise target.", "<b>ROE / margins:</b> higher usually signals stronger quality, but check debt and business cyclicality."])
 
     # ══════════ TAB 3 — RISK ══════════════════════════════════════
     if active_tab == "risk":
