@@ -3892,7 +3892,7 @@ def fetch_market_regime_for_investor(refresh_token=0):
         label = "Risk-off / defensive"
     else:
         label = "Mixed / selective"
-    return {"risk_on": risk_on, "label": label, "assets": rows}
+    return {"risk_on": risk_on, "label": label, "assets": rows, "vix": round(float(vix), 1)}
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -4778,23 +4778,23 @@ def investor_backtest_from_portfolio(port, period="1y", refresh_token=0, rebalan
         rebal_dates = set(d.normalize() for d in month_ends)
 
         port_value = pd.Series(index=returns.index, dtype=float)
-        holding_units  = eq_w.copy()   # initial units (proportional shares)
-        total_val  = 1.0
+        # Track each holding's dollar value so weights drift naturally between rebalancing dates.
+        holding_values = eq_w.copy().astype(float)   # equity; sums to (1 - cash_w)
+        cash_value = float(cash_w)                   # cash portion
 
         for i, date in enumerate(returns.index):
             day_ret = returns.loc[date]
-            # Rebalance at month-end
-            if date.normalize() in rebal_dates and i > 0:
-                # Reset to target weights
-                holding_units = eq_w * total_val / prices[available].loc[date]
-                holding_units = eq_w  # simplified: use target weights
-            r_port = (day_ret * eq_w).sum() + cash_daily * cash_w
-            total_val *= (1 + r_port)
+            # Drift: update each holding by its own daily return
+            holding_values = holding_values * (1.0 + day_ret.reindex(holding_values.index).fillna(0.0))
+            cash_value *= (1.0 + cash_daily)
+            total_val = float(holding_values.sum()) + cash_value
             port_value.iloc[i] = total_val
+            # Rebalance at month-end: reset each holding to its target weight
+            if i > 0 and date.normalize() in rebal_dates:
+                holding_values = eq_w.copy().astype(float) * total_val
+                cash_value = float(cash_w) * total_val
 
         curve = port_value.rename("Portfolio")
-        daily = curve.pct_change().dropna()
-        daily.iloc[0] = (curve.iloc[0] - 1.0)  # first day return from 1.0
 
         # Per-holding contribution (weighted return over full period)
         holding_total = prices[available].iloc[-1] / prices[available].iloc[0] - 1
