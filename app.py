@@ -848,6 +848,22 @@ def _normalize_ohlcv(df):
     }
     out = out.rename(columns={k: v for k, v in rename_map.items() if k in out.columns})
 
+    # Renaming can intentionally map multiple FMP aliases to one canonical
+    # column, e.g. both ``close`` and ``price`` -> ``Close`` or ``date`` and
+    # ``label`` -> ``date``. Combine duplicates by taking the first non-null
+    # value row-wise so mixed endpoint shapes do not break numeric conversion.
+    if out.columns.duplicated().any():
+        combined = pd.DataFrame(index=out.index)
+        for col in dict.fromkeys(list(out.columns)):
+            block = out.loc[:, out.columns == col]
+            if isinstance(block, pd.DataFrame) and block.shape[1] > 1:
+                combined[col] = block.bfill(axis=1).iloc[:, 0]
+            elif isinstance(block, pd.DataFrame):
+                combined[col] = block.iloc[:, 0]
+            else:
+                combined[col] = block
+        out = combined
+
     if "date" in out.columns:
         out["date"] = pd.to_datetime(out["date"], errors="coerce")
         out = out.dropna(subset=["date"]).set_index("date")
@@ -867,6 +883,11 @@ def _normalize_ohlcv(df):
 
     for col in ["Open", "High", "Low", "Close", "Volume"]:
         out[col] = pd.to_numeric(out[col], errors="coerce")
+    # Light endpoints may provide only Close/price for some rows. Preserve the
+    # series by filling missing OHLC values from Close instead of dropping rows.
+    for col in ["Open", "High", "Low"]:
+        out[col] = out[col].fillna(out["Close"])
+    out["Volume"] = out["Volume"].fillna(0)
 
     return out[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
 
@@ -1030,7 +1051,7 @@ def _fmp_build_info(ticker):
                 return x
         return None
 
-    def rows_all(attempts, stop_after_first=None):
+    def rows_all(attempts, stop_after_first=None, latest_only=True):
         """Return records from FMP fallback endpoints.
 
         In normal FAST mode this stops after the first endpoint that returns
@@ -1048,6 +1069,11 @@ def _fmp_build_info(ticker):
                 rows = _records(data)
                 if not rows:
                     continue
+                # Most FMP endpoints return latest-first time-series rows. For Yahoo-style
+                # ``info`` fields, using older rows can silently overwrite current data,
+                # so only merge the latest row from each endpoint unless explicitly asked.
+                if latest_only:
+                    rows = rows[:1]
                 for row in rows:
                     key = (endpoint, base, str(row.get("date", "")), str(row.get("calendarYear", "")), str(row.get("symbol", "")))
                     if key in seen and len(row) < 5:
@@ -1172,7 +1198,9 @@ def _fmp_build_info(ticker):
         ])
 
         pe = N(km.get("peRatioTTM"), ratios.get("priceEarningsRatioTTM"), km.get("peRatio"), ratios.get("priceEarningsRatio"), info.get("trailingPE"), default=None)
-        fpe = N(km.get("priceToEarningsRatioTTM"), km.get("forwardPE"), quote.get("forwardPE"), pe, default=None)
+        # Forward P/E must not fall back to trailing P/E/TTM P/E; if FMP does not
+        # provide it directly, it is reconstructed later from current price / forward EPS.
+        fpe = N(km.get("forwardPERatioTTM"), km.get("forwardPE"), quote.get("forwardPE"), default=None)
         ps = N(km.get("priceToSalesRatioTTM"), ratios.get("priceToSalesRatioTTM"), km.get("priceToSalesRatio"), ratios.get("priceToSalesRatio"), default=None)
         pb = N(km.get("pbRatioTTM"), km.get("priceToBookRatioTTM"), ratios.get("priceToBookRatioTTM"), km.get("pbRatio"), km.get("priceToBookRatio"), ratios.get("priceBookValueRatio"), default=None)
         peg = N(km.get("pegRatioTTM"), km.get("pegRatio"), ratios.get("priceEarningsToGrowthRatioTTM"), ratios.get("pegRatio"), default=None)
@@ -1346,7 +1374,7 @@ def _fmp_build_info(ticker):
         ])
         short_pct = P(short_row.get("shortPercentOfFloat"), short_row.get("shortFloatPercent"), short_row.get("shortPercent"))
         if short_pct is None and float_shares not in (None, 0):
-            short_interest = N(short_row.get("shortInterest"), short_row.get("shortVolume"), short_row.get("sharesShort"), default=None)
+            short_interest = N(short_row.get("shortInterest"), short_row.get("sharesShort"), default=None)
             if short_interest is not None:
                 short_pct = short_interest / float_shares
 
@@ -1362,51 +1390,88 @@ def _fmp_build_info(ticker):
             ("price-target-summary", {"symbol": sym}, "stable"),
         ])
         analyst_est = merge_records([
-            (f"analyst-estimates/{sym}", {"limit": 4}, "v3"),
-            ("analyst-estimates", {"symbol": sym, "limit": 4}, "stable"),
-        ])
-        rating = merge_records([
-            ("ratings-snapshot", {"symbol": sym}, "stable"),
-            (f"rating/{sym}", {}, "v3"),
+            # Stable docs require symbol + period + page + limit. Keep v3 as a fallback.
+            ("analyst-estimates", {"symbol": sym, "period": "annual", "page": 0, "limit": 10}, "stable"),
+            ("analyst-estimates", {"symbol": sym, "period": "quarter", "page": 0, "limit": 10}, "stable"),
+            (f"analyst-estimates/{sym}", {"period": "annual", "limit": 10}, "v3"),
+            (f"analyst-estimates/{sym}", {"period": "quarter", "limit": 10}, "v3"),
         ])
         rec_rows = rows_all([
-            ("analyst-stock-recommendations", {"symbol": sym, "limit": 5}, "stable"),
+            # Current stable analyst-rating consensus endpoint.
+            ("grades-consensus", {"symbol": sym}, "stable"),
+            # Legacy fallback. Do not use ratings-snapshot here: that is a financial health grade, not analyst consensus.
             (f"analyst-stock-recommendations/{sym}", {"limit": 5}, "v3"),
-        ])
-        rec_key, rec_mean, rec_total = None, None, None
+        ], stop_after_first=False)
+        rec_key, rec_mean, rec_total, rec_source = None, None, None, ""
         if rec_rows:
             r = rec_rows[0]
-            strong_buys = N(r.get("analystRatingsStrongBuy"), r.get("strongBuy"), default=0) or 0
-            buys = N(r.get("analystRatingsbuy"), r.get("analystRatingsBuy"), r.get("buy"), default=0) or 0
-            holds = N(r.get("analystRatingsHold"), r.get("hold"), default=0) or 0
-            sells = N(r.get("analystRatingsSell"), r.get("sell"), default=0) or 0
-            strong_sells = N(r.get("analystRatingsStrongSell"), r.get("strongSell"), default=0) or 0
+            strong_buys = N(r.get("strongBuy"), r.get("analystRatingsStrongBuy"), r.get("strong_buy"), default=0) or 0
+            buys = N(r.get("buy"), r.get("analystRatingsBuy"), r.get("analystRatingsbuy"), default=0) or 0
+            holds = N(r.get("hold"), r.get("analystRatingsHold"), default=0) or 0
+            sells = N(r.get("sell"), r.get("analystRatingsSell"), default=0) or 0
+            strong_sells = N(r.get("strongSell"), r.get("analystRatingsStrongSell"), r.get("strong_sell"), default=0) or 0
             rec_total = strong_buys + buys + holds + sells + strong_sells
             if rec_total:
-                bullish = strong_buys + buys
-                bearish = sells + strong_sells
-                rec_key = "buy" if bullish / rec_total >= 0.55 else "sell" if bearish / rec_total >= 0.35 else "hold"
-                rec_mean = 1.8 if rec_key == "buy" else 4.0 if rec_key == "sell" else 3.0
+                # Yahoo-style score where 1=Strong Buy and 5=Strong Sell.
+                rec_mean = (1 * strong_buys + 2 * buys + 3 * holds + 4 * sells + 5 * strong_sells) / rec_total
+                if rec_mean <= 1.5:
+                    rec_key = "strong buy"
+                elif rec_mean <= 2.5:
+                    rec_key = "buy"
+                elif rec_mean < 3.5:
+                    rec_key = "hold"
+                elif rec_mean < 4.5:
+                    rec_key = "sell"
+                else:
+                    rec_key = "strong sell"
+                rec_source = "FMP grades-consensus" if any(k in r for k in ("strongBuy", "strongSell")) else "FMP legacy analyst-stock-recommendations"
 
         if info.get("forwardEps") is None:
             _merge_nonempty(info, {
-                "forwardEps": N(analyst_est.get("estimatedEpsAvg"), analyst_est.get("estimatedEpsHigh"), analyst_est.get("estimatedEpsLow"), default=None)
+                "forwardEps": N(
+                    analyst_est.get("estimatedEpsAvg"), analyst_est.get("epsAvg"), analyst_est.get("epsAverage"),
+                    analyst_est.get("estimatedEpsHigh"), analyst_est.get("estimatedEpsLow"), default=None
+                )
             })
 
         _merge_nonempty(info, {
-            "targetLowPrice": N(target.get("targetLow"), target.get("targetLowPrice"), target.get("priceTargetLow"), default=None),
-            "targetMeanPrice": N(target.get("targetConsensus"), target.get("targetMeanPrice"), target.get("priceTargetAverage"), target.get("targetPrice"), default=None),
-            "targetHighPrice": N(target.get("targetHigh"), target.get("targetHighPrice"), target.get("priceTargetHigh"), default=None),
-            "numberOfAnalystOpinions": N(target.get("numberOfAnalysts"), target.get("analystCount"), rec_total, default=None),
-            "recommendationKey": rec_key or T(rating.get("ratingRecommendation"), rating.get("rating"), rating.get("recommendation"), default=""),
-            "recommendationMean": rec_mean or N(rating.get("ratingScore"), rating.get("ratingDetailsDCFScore"), default=None),
+            "targetLowPrice": N(target.get("targetLow"), target.get("targetLowPrice"), target.get("priceTargetLow"), target.get("targetLowEstimate"), default=None),
+            "targetMeanPrice": N(target.get("targetConsensus"), target.get("targetMeanPrice"), target.get("priceTargetAverage"), target.get("targetPrice"), target.get("priceTargetConsensus"), default=None),
+            "targetHighPrice": N(target.get("targetHigh"), target.get("targetHighPrice"), target.get("priceTargetHigh"), target.get("targetHighEstimate"), default=None),
+            "numberOfAnalystOpinions": N(target.get("numberOfAnalysts"), target.get("analystCount"), target.get("priceTargetAnalystCount"), rec_total, default=None),
+            "recommendationKey": rec_key or "",
+            "recommendationMean": rec_mean,
+            "recommendationSource": rec_source,
         })
+        if info.get("numberOfAnalystOpinions") in (None, "", 0, 0.0) and rec_total:
+            info["numberOfAnalystOpinions"] = rec_total
+        if info.get("forwardPE") in (None, "", 0, 0.0):
+            fwd_eps_for_pe = N(info.get("forwardEps"), default=None)
+            if price not in (None, 0) and fwd_eps_for_pe not in (None, 0):
+                info["forwardPE"] = price / fwd_eps_for_pe
+
 
         # Final fallback computations that help old model calculations.
         if info.get("sharesOutstanding") is None and market_cap not in (None, 0) and price not in (None, 0):
             info["sharesOutstanding"] = market_cap / price
         if info.get("priceToSalesTrailing12Months") is None and market_cap not in (None, 0) and info.get("totalRevenue") not in (None, 0):
             info["priceToSalesTrailing12Months"] = market_cap / info["totalRevenue"]
+        # Enterprise value and EV multiples can be reconstructed when FMP key-metrics misses them.
+        if info.get("enterpriseValue") is None and market_cap not in (None, 0):
+            td = N(info.get("totalDebt"), default=0) or 0
+            cash = N(info.get("totalCash"), default=0) or 0
+            info["enterpriseValue"] = market_cap + td - cash
+        if info.get("enterpriseToRevenue") is None and info.get("enterpriseValue") not in (None, 0) and info.get("totalRevenue") not in (None, 0):
+            info["enterpriseToRevenue"] = info["enterpriseValue"] / info["totalRevenue"]
+        if info.get("enterpriseToEbitda") is None and info.get("enterpriseValue") not in (None, 0) and info.get("ebitda") not in (None, 0):
+            info["enterpriseToEbitda"] = info["enterpriseValue"] / info["ebitda"]
+        if info.get("payoutRatio") is None:
+            div_paid = N(latest_cash.get("dividendsPaid"), latest_cash.get("commonDividendsPaid"), latest_cash.get("dividendsPaidTTM"), default=None)
+            ni = N(info.get("netIncomeToCommon"), default=None)
+            if div_paid is not None and ni not in (None, 0) and ni > 0:
+                info["payoutRatio"] = abs(div_paid) / ni
+            elif info.get("dividendYield") not in (None, 0) and price not in (None, 0) and info.get("trailingEps") not in (None, 0):
+                info["payoutRatio"] = (info["dividendYield"] * price) / info["trailingEps"]
         if info.get("trailingPE") is None and price not in (None, 0) and info.get("trailingEps") not in (None, 0):
             info["trailingPE"] = price / info["trailingEps"]
         if info.get("priceToBook") is None and price not in (None, 0) and info.get("bookValue") not in (None, 0):
@@ -1460,6 +1525,17 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
     bal = one(f"balance-sheet-statement/{sym}", {"limit": 1, "period": "quarter"}, "v3") or one(f"balance-sheet-statement/{sym}", {"limit": 1}, "v3") or one("balance-sheet-statement", {"symbol": sym, "limit": 1, "period": "quarter"}, "stable")
     cf = one(f"cash-flow-statement-ttm/{sym}", {}, "v3") or one("cash-flow-statement-ttm", {"symbol": sym}, "stable") or one(f"cash-flow-statement/{sym}", {"limit": 1}, "v3")
     gr = one(f"financial-growth/{sym}", {"limit": 1}, "v3") or one("financial-growth", {"symbol": sym, "limit": 1}, "stable")
+    ae = (
+        one("analyst-estimates", {"symbol": sym, "period": "annual", "page": 0, "limit": 10}, "stable")
+        or one("analyst-estimates", {"symbol": sym, "period": "quarter", "page": 0, "limit": 10}, "stable")
+        or one(f"analyst-estimates/{sym}", {"period": "annual", "limit": 10}, "v3")
+        or one(f"analyst-estimates/{sym}", {"period": "quarter", "limit": 10}, "v3")
+    )
+    evrow = one("enterprise-values", {"symbol": sym, "limit": 1}, "stable") or one(f"enterprise-values/{sym}", {"limit": 1}, "v3")
+    share_float_row = one("shares-float", {"symbol": sym}, "stable") or one("shares_float", {"symbol": sym}, "v4") or one(f"shares_float/{sym}", {}, "v4")
+    short_row = one("short_interest", {"symbol": sym, "limit": 1}, "v4") or one(f"short_interest/{sym}", {"limit": 1}, "v4")
+    recrow = one("grades-consensus", {"symbol": sym}, "stable") or one(f"analyst-stock-recommendations/{sym}", {"limit": 5}, "v3")
+    targetrow = one("price-target-consensus", {"symbol": sym}, "stable") or one("price-target-summary", {"symbol": sym}, "stable")
 
     hi, lo = _parse_range_high_low(prof.get("range"))
     set_missing("regularMarketPrice", q.get("price"), prof.get("price"))
@@ -1480,8 +1556,11 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
     set_missing("sharesOutstanding", q.get("sharesOutstanding"), prof.get("sharesOutstanding"))
 
     set_missing("trailingEps", q.get("eps"), inc.get("eps"), inc.get("epsTTM"), km.get("netIncomePerShareTTM"))
+    set_missing("forwardEps", ae.get("estimatedEpsAvg"), ae.get("epsAvg"), ae.get("epsAverage"), ae.get("estimatedEpsHigh"), ae.get("estimatedEpsLow"))
     set_missing("trailingPE", q.get("pe"), q.get("peRatio"), prof.get("pe"), km.get("peRatioTTM"), rt.get("priceEarningsRatioTTM"))
-    set_missing("forwardPE", q.get("forwardPE"), km.get("forwardPERatioTTM"), km.get("priceToEarningsRatioTTM"), info.get("trailingPE"))
+    # Do not use trailing/TTM P/E as Forward P/E. If direct forward P/E is missing,
+    # reconstruct it later from current price and forward EPS.
+    set_missing("forwardPE", q.get("forwardPE"), km.get("forwardPERatioTTM"), km.get("forwardPE"))
     set_missing("pegRatio", km.get("pegRatioTTM"), rt.get("priceEarningsToGrowthRatioTTM"))
     set_missing("priceToSalesTrailing12Months", km.get("priceToSalesRatioTTM"), rt.get("priceToSalesRatioTTM"))
     set_missing("priceToBook", km.get("pbRatioTTM"), km.get("priceToBookRatioTTM"), rt.get("priceToBookRatioTTM"))
@@ -1498,11 +1577,36 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
     set_missing("currentRatio", rt.get("currentRatioTTM"), km.get("currentRatioTTM"))
     set_missing("quickRatio", rt.get("quickRatioTTM"), km.get("quickRatioTTM"))
     set_missing("payoutRatio", rt.get("payoutRatioTTM"), km.get("payoutRatioTTM"), pctval=True)
+    if info.get("payoutRatio") in (None, "", 0, 0.0):
+        div_paid = n(cf.get("dividendsPaid"), cf.get("commonDividendsPaid"), cf.get("dividendsPaidTTM"), default=None)
+        ni = n(info.get("netIncomeToCommon"), inc.get("netIncome"), inc.get("netIncomeTTM"), default=None)
+        eps_for_payout = n(info.get("trailingEps"), q.get("eps"), inc.get("eps"), default=None)
+        div_yield = pct(info.get("dividendYield"), rt.get("dividendYieldTTM"), km.get("dividendYieldTTM"))
+        price_for_payout = n(info.get("regularMarketPrice"), q.get("price"), prof.get("price"), default=None)
+        if div_paid is not None and ni not in (None, 0) and ni > 0:
+            info["payoutRatio"] = abs(div_paid) / ni
+        elif div_yield not in (None, 0) and price_for_payout not in (None, 0) and eps_for_payout not in (None, 0):
+            info["payoutRatio"] = (div_yield * price_for_payout) / eps_for_payout
     de = n(rt.get("debtEquityRatioTTM"), rt.get("debtToEquityRatioTTM"), km.get("debtToEquityTTM"), default=None)
     if info.get("debtToEquity") in (None, "", 0, 0.0) and de is not None:
         info["debtToEquity"] = de * 100 if abs(de) < 20 else de
-    set_missing("totalDebt", bal.get("totalDebt"), bal.get("shortTermDebt"), bal.get("longTermDebt"))
+    std_repair = n(bal.get("shortTermDebt"), bal.get("shortTermBorrowings"), default=0) or 0
+    ltd_repair = n(bal.get("longTermDebt"), bal.get("longTermDebtNoncurrent"), default=0) or 0
+    set_missing("totalDebt", bal.get("totalDebt"), (std_repair + ltd_repair if (std_repair or ltd_repair) else None))
     set_missing("totalCash", bal.get("cashAndCashEquivalents"), bal.get("cashAndShortTermInvestments"))
+    set_missing("enterpriseValue", evrow.get("enterpriseValue"), evrow.get("enterpriseValueTTM"), km.get("enterpriseValue"), km.get("enterpriseValueTTM"))
+    # Reconstruct enterprise value and EV multiples if FMP's key-metrics endpoint omits them.
+    mcap_for_ev = n(info.get("marketCap"), q.get("marketCap"), prof.get("mktCap"), default=None)
+    debt_for_ev = n(info.get("totalDebt"), default=0) or 0
+    cash_for_ev = n(info.get("totalCash"), default=0) or 0
+    if info.get("enterpriseValue") in (None, "", 0, 0.0) and mcap_for_ev not in (None, 0):
+        info["enterpriseValue"] = mcap_for_ev + debt_for_ev - cash_for_ev
+    rev_for_ev = n(info.get("totalRevenue"), inc.get("revenue"), inc.get("revenueTTM"), km.get("revenueTTM"), default=None)
+    ebitda_for_ev = n(info.get("ebitda"), inc.get("ebitda"), inc.get("ebitdaTTM"), km.get("ebitdaTTM"), default=None)
+    if info.get("enterpriseToRevenue") in (None, "", 0, 0.0) and info.get("enterpriseValue") not in (None, 0) and rev_for_ev not in (None, 0):
+        info["enterpriseToRevenue"] = info["enterpriseValue"] / rev_for_ev
+    if info.get("enterpriseToEbitda") in (None, "", 0, 0.0) and info.get("enterpriseValue") not in (None, 0) and ebitda_for_ev not in (None, 0):
+        info["enterpriseToEbitda"] = info["enterpriseValue"] / ebitda_for_ev
     set_missing("freeCashflow", cf.get("freeCashFlow"), cf.get("freeCashFlowTTM"), km.get("freeCashFlowTTM"))
     set_missing("operatingCashflow", cf.get("operatingCashFlow"), cf.get("netCashProvidedByOperatingActivities"))
     set_missing("revenueGrowth", gr.get("revenueGrowth"), gr.get("growthRevenue"), pctval=True)
@@ -1517,6 +1621,18 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
         elif equity is not None and shares not in (None, 0):
             info["bookValue"] = equity / shares
 
+    # Float and short-interest fields are plan-dependent on FMP; use only source values, never fabricate.
+    set_missing("floatShares", share_float_row.get("floatShares"), share_float_row.get("float"), share_float_row.get("freeFloatShares"), share_float_row.get("freeFloat"))
+    short_pct = pct(short_row.get("shortPercentOfFloat"), short_row.get("shortFloatPercent"), short_row.get("shortPercent"), short_row.get("shortPercentFloat"))
+    if info.get("shortPercentOfFloat") in (None, "", 0, 0.0):
+        if short_pct is not None:
+            info["shortPercentOfFloat"] = short_pct
+        else:
+            short_interest = n(short_row.get("shortInterest"), short_row.get("sharesShort"), default=None)
+            flt = n(info.get("floatShares"), share_float_row.get("floatShares"), share_float_row.get("float"), default=None)
+            if short_interest is not None and flt not in (None, 0):
+                info["shortPercentOfFloat"] = short_interest / flt
+
     price = n(info.get("regularMarketPrice"), info.get("currentPrice"), default=None)
     eps = n(info.get("trailingEps"), default=None)
     mcap = n(info.get("marketCap"), default=None)
@@ -1525,8 +1641,10 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
         info["sharesOutstanding"] = mcap / price
     if info.get("trailingPE") in (None, "", 0, 0.0) and price not in (None, 0) and eps not in (None, 0):
         info["trailingPE"] = price / eps
-    if info.get("forwardPE") in (None, "", 0, 0.0) and info.get("trailingPE") not in (None, "", 0, 0.0):
-        info["forwardPE"] = info["trailingPE"]
+    if info.get("forwardPE") in (None, "", 0, 0.0):
+        fwd_eps_for_pe = n(info.get("forwardEps"), default=None)
+        if price not in (None, 0) and fwd_eps_for_pe not in (None, 0):
+            info["forwardPE"] = price / fwd_eps_for_pe
     if info.get("priceToSalesTrailing12Months") in (None, "", 0, 0.0) and mcap not in (None, 0) and rev not in (None, 0):
         info["priceToSalesTrailing12Months"] = mcap / rev
     if info.get("pegRatio") in (None, "", 0, 0.0):
@@ -1534,6 +1652,27 @@ def _fmp_repair_ui_fields(info, ticker, hist=None):
         eg = n(info.get("earningsGrowth"), default=None)
         if pe is not None and eg not in (None, 0):
             info["pegRatio"] = pe / (eg * 100 if abs(eg) < 3 else eg)
+
+    # Repair analyst targets/consensus with current FMP endpoints.
+    set_missing("targetLowPrice", targetrow.get("targetLow"), targetrow.get("targetLowPrice"), targetrow.get("priceTargetLow"), targetrow.get("targetLowEstimate"))
+    set_missing("targetMeanPrice", targetrow.get("targetConsensus"), targetrow.get("targetMeanPrice"), targetrow.get("priceTargetAverage"), targetrow.get("targetPrice"), targetrow.get("priceTargetConsensus"))
+    set_missing("targetHighPrice", targetrow.get("targetHigh"), targetrow.get("targetHighPrice"), targetrow.get("priceTargetHigh"), targetrow.get("targetHighEstimate"))
+    if info.get("numberOfAnalystOpinions") in (None, "", 0, 0.0):
+        ac = n(targetrow.get("numberOfAnalysts"), targetrow.get("analystCount"), targetrow.get("priceTargetAnalystCount"), default=None)
+        if ac not in (None, 0):
+            info["numberOfAnalystOpinions"] = ac
+    sb = n(recrow.get("strongBuy"), recrow.get("analystRatingsStrongBuy"), recrow.get("strong_buy"), default=0) or 0
+    by = n(recrow.get("buy"), recrow.get("analystRatingsBuy"), recrow.get("analystRatingsbuy"), default=0) or 0
+    hd = n(recrow.get("hold"), recrow.get("analystRatingsHold"), default=0) or 0
+    sl = n(recrow.get("sell"), recrow.get("analystRatingsSell"), default=0) or 0
+    ss = n(recrow.get("strongSell"), recrow.get("analystRatingsStrongSell"), recrow.get("strong_sell"), default=0) or 0
+    total_rec = sb + by + hd + sl + ss
+    if total_rec:
+        rm = (1 * sb + 2 * by + 3 * hd + 4 * sl + 5 * ss) / total_rec
+        info["recommendationMean"] = rm
+        info["numberOfAnalystOpinions"] = info.get("numberOfAnalystOpinions") or total_rec
+        info["recommendationKey"] = "strong buy" if rm <= 1.5 else "buy" if rm <= 2.5 else "hold" if rm < 3.5 else "sell" if rm < 4.5 else "strong sell"
+        info["recommendationSource"] = "FMP grades-consensus" if any(k in recrow for k in ("strongBuy", "strongSell")) else "FMP legacy analyst-stock-recommendations"
     return info
 
 
@@ -6497,38 +6636,77 @@ def main():
             tm=float(info.get("targetMeanPrice",0) or 0)
             th=float(info.get("targetHighPrice",0) or 0)
             na=int(info.get("numberOfAnalystOpinions",0) or 0)
-            rk=(info.get("recommendationKey") or "—").upper()
-            rm=float(info.get("recommendationMean",3) or 3)
-            rc=GREEN if rm<=2 else RED if rm>=4 else AMBER
-            up=(tm/price-1)*100 if price and tm else 0
-            up_c=GREEN if up>0 else RED
-            st.markdown(f"""
-            <div style="background:#13161e;border:1px solid #1e2433;border-radius:12px;
-                        padding:1.5rem;margin-bottom:1rem;text-align:center">
-              <div style="font-size:10px;color:#475569;text-transform:uppercase;
-                          letter-spacing:0.1em;margin-bottom:10px">Consensus · {na} Analysts</div>
-              <div style="font-size:2.5rem;font-weight:800;color:{rc};letter-spacing:-0.02em">{rk}</div>
-              <div style="font-size:12px;color:#475569;margin-top:6px">
-                Score {rm:.1f}/5.0 &nbsp;(1=Strong Buy · 5=Strong Sell)</div>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
-              <div style="background:#13161e;border:1px solid #1e2433;border-radius:10px;padding:12px;text-align:center">
-                <div style="font-size:10px;color:#475569;margin-bottom:5px">LOW TARGET</div>
-                <div style="font-size:1.2rem;font-weight:600;color:{RED};font-family:monospace">${tl:.0f}</div>
-              </div>
-              <div style="background:#13161e;border:1px solid #252a38;border-radius:10px;padding:12px;text-align:center">
-                <div style="font-size:10px;color:#475569;margin-bottom:5px">CONSENSUS</div>
-                <div style="font-size:1.5rem;font-weight:700;color:{GREEN};font-family:monospace">${tm:.0f}</div>
-              </div>
-              <div style="background:#13161e;border:1px solid #1e2433;border-radius:10px;padding:12px;text-align:center">
-                <div style="font-size:10px;color:#475569;margin-bottom:5px">HIGH TARGET</div>
-                <div style="font-size:1.2rem;font-weight:600;color:{GREEN};font-family:monospace">${th:.0f}</div>
-              </div>
-            </div>
-            <div style="text-align:center;font-size:1.1rem;font-weight:700;
-                        color:{up_c};font-family:monospace">
-              {"▲" if up>0 else "▼"} {abs(up):.1f}% implied upside</div>
-            """, unsafe_allow_html=True)
+            rk_raw=(info.get("recommendationKey") or "").strip()
+            rm_raw=info.get("recommendationMean", None)
+            source=(info.get("recommendationSource") or "").strip()
+            has_rec = bool(rk_raw and rm_raw not in (None, "", 0, 0.0) and na > 0)
+            has_targets = bool(tm and tm > 0)
+
+            if has_rec:
+                rk=rk_raw.replace("_", " ").title()
+                rm=float(rm_raw)
+                rc=GREEN if rm<=2 else RED if rm>=4 else AMBER
+                up=(tm/price-1)*100 if price and tm else 0
+                up_c=GREEN if up>0 else RED
+                st.markdown(f"""
+                <div style="background:#13161e;border:1px solid #1e2433;border-radius:12px;
+                            padding:1.5rem;margin-bottom:1rem;text-align:center">
+                  <div style="font-size:10px;color:#475569;text-transform:uppercase;
+                              letter-spacing:0.1em;margin-bottom:10px">Analyst Consensus · {na} Analysts</div>
+                  <div style="font-size:2.5rem;font-weight:800;color:{rc};letter-spacing:-0.02em">{rk}</div>
+                  <div style="font-size:12px;color:#475569;margin-top:6px">
+                    Score {rm:.1f}/5.0 &nbsp;(1=Strong Buy · 5=Strong Sell)</div>
+                  <div style="font-size:10px;color:#334155;margin-top:8px">Source: {source or "FMP analyst consensus"}</div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
+                  <div style="background:#13161e;border:1px solid #1e2433;border-radius:10px;padding:12px;text-align:center">
+                    <div style="font-size:10px;color:#475569;margin-bottom:5px">LOW TARGET</div>
+                    <div style="font-size:1.2rem;font-weight:600;color:{RED};font-family:monospace">{("$" + format(tl, ".0f")) if tl else "—"}</div>
+                  </div>
+                  <div style="background:#13161e;border:1px solid #252a38;border-radius:10px;padding:12px;text-align:center">
+                    <div style="font-size:10px;color:#475569;margin-bottom:5px">CONSENSUS</div>
+                    <div style="font-size:1.5rem;font-weight:700;color:{GREEN};font-family:monospace">{("$" + format(tm, ".0f")) if tm else "—"}</div>
+                  </div>
+                  <div style="background:#13161e;border:1px solid #1e2433;border-radius:10px;padding:12px;text-align:center">
+                    <div style="font-size:10px;color:#475569;margin-bottom:5px">HIGH TARGET</div>
+                    <div style="font-size:1.2rem;font-weight:600;color:{GREEN};font-family:monospace">{("$" + format(th, ".0f")) if th else "—"}</div>
+                  </div>
+                </div>
+                <div style="text-align:center;font-size:1.1rem;font-weight:700;
+                            color:{up_c};font-family:monospace">
+                  {("▲" if up>0 else "▼") if tm else ""} {f"{abs(up):.1f}% implied upside" if tm else "No price-target upside available"}</div>
+                """, unsafe_allow_html=True)
+            else:
+                up=(tm/price-1)*100 if price and tm else 0
+                up_c=GREEN if up>0 else RED
+                subtitle = "FMP returned price targets, but no analyst-count/rating breakdown." if has_targets else "No analyst consensus data returned by FMP for this ticker or plan."
+                st.markdown(f"""
+                <div style="background:#13161e;border:1px solid #1e2433;border-radius:12px;
+                            padding:1.5rem;margin-bottom:1rem;text-align:center">
+                  <div style="font-size:10px;color:#475569;text-transform:uppercase;
+                              letter-spacing:0.1em;margin-bottom:10px">Analyst Consensus</div>
+                  <div style="font-size:2rem;font-weight:800;color:{TEXT_COL};letter-spacing:-0.02em">N/A</div>
+                  <div style="font-size:12px;color:#64748b;margin-top:8px">{subtitle}</div>
+                  <div style="font-size:11px;color:#475569;margin-top:8px">Financial health grades such as “B” are no longer shown as analyst consensus.</div>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">
+                  <div style="background:#13161e;border:1px solid #1e2433;border-radius:10px;padding:12px;text-align:center">
+                    <div style="font-size:10px;color:#475569;margin-bottom:5px">LOW TARGET</div>
+                    <div style="font-size:1.2rem;font-weight:600;color:{RED};font-family:monospace">{("$" + format(tl, ".0f")) if tl else "—"}</div>
+                  </div>
+                  <div style="background:#13161e;border:1px solid #252a38;border-radius:10px;padding:12px;text-align:center">
+                    <div style="font-size:10px;color:#475569;margin-bottom:5px">CONSENSUS</div>
+                    <div style="font-size:1.5rem;font-weight:700;color:{GREEN};font-family:monospace">{("$" + format(tm, ".0f")) if tm else "—"}</div>
+                  </div>
+                  <div style="background:#13161e;border:1px solid #1e2433;border-radius:10px;padding:12px;text-align:center">
+                    <div style="font-size:10px;color:#475569;margin-bottom:5px">HIGH TARGET</div>
+                    <div style="font-size:1.2rem;font-weight:600;color:{GREEN};font-family:monospace">{("$" + format(th, ".0f")) if th else "—"}</div>
+                  </div>
+                </div>
+                <div style="text-align:center;font-size:1.1rem;font-weight:700;
+                            color:{up_c};font-family:monospace">
+                  {("▲" if up>0 else "▼") if tm else ""} {f"{abs(up):.1f}% implied upside" if tm else "No price-target upside available"}</div>
+                """, unsafe_allow_html=True)
 
         st.markdown(legend_html([("Stock",BLUE,"bar"),("Sector Avg",AMBER,"bar"),("S&P 500","#475569","bar")]),
                     unsafe_allow_html=True)
