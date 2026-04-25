@@ -6332,6 +6332,32 @@ def main():
                 st.caption("No company matches found. Try a broader keyword or type the ticker directly.")
 
         st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
+
+        # ── Manual Refresh button (top of sidebar, always visible) ──
+        if st.button(
+            "⟳  Refresh Data",
+            type="primary",
+            use_container_width=True,
+            help="Clear all cached prices, indicators, and fundamentals and re-fetch from FMP.",
+        ):
+            fetch_stock.clear()
+            fetch_chart_history.clear()
+            _fmp_build_info.clear()
+            calc_ta.clear()
+            calc_risk.clear()
+            fetch_news_items.clear()
+            fetch_market_news.clear()
+            fetch_spy.clear()
+            st.session_state["_last_manual_refresh"] = datetime.now().strftime("%H:%M:%S")
+            st.rerun()
+
+        _last = st.session_state.get("_last_manual_refresh")
+        if _last:
+            st.caption(f"↺ Last refreshed at {_last}")
+        else:
+            st.caption("Data is cached · press Refresh for latest prices.")
+
+        st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
         st.markdown('<div style="font-size:10px;color:#475569;text-transform:uppercase;'
                     'letter-spacing:0.1em;margin-bottom:8px">Historical Data Range</div>',
                     unsafe_allow_html=True)
@@ -6414,31 +6440,6 @@ def main():
         render_ai_model_selector("", key="ai_model_sidebar")
         st.caption(ai_model_description())
         st.markdown('<div class="sidebar-divider"></div>', unsafe_allow_html=True)
-
-        # ── Manual refresh ─────────────────────────────────────────
-        st.markdown(
-            '<div style="font-size:10px;color:#475569;text-transform:uppercase;'
-            'letter-spacing:0.1em;margin-bottom:8px">Data</div>',
-            unsafe_allow_html=True,
-        )
-        if st.button("⟳  Refresh Data", type="primary", use_container_width=True,
-                     help="Clear all cached prices, indicators, and fundamentals for the current ticker and re-fetch from FMP."):
-            fetch_stock.clear()
-            fetch_chart_history.clear()
-            _fmp_build_info.clear()
-            calc_ta.clear()
-            calc_risk.clear()
-            fetch_news_items.clear()
-            fetch_market_news.clear()
-            fetch_spy.clear()
-            st.session_state["_last_manual_refresh"] = datetime.now().strftime("%H:%M:%S")
-            st.rerun()
-
-        _last = st.session_state.get("_last_manual_refresh")
-        if _last:
-            st.caption(f"Last refreshed at {_last}")
-        else:
-            st.caption("Data is cached — press Refresh to load the latest prices.")
         if st.session_state.get("section_nav", "overview") != "overview":
             if st.button("← Back to Overview", key="sidebar_back_overview", use_container_width=True):
                 st.session_state["section_nav"] = "overview"
