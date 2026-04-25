@@ -539,40 +539,47 @@ def legend_html(items):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  DATA LAYER — FMP ONLY
+#  DATA LAYER — FMP ONLY, YFINANCE-COMPATIBLE FIELD MAP
 # ══════════════════════════════════════════════════════════════════
 import os as _os
 _FMP_V3_BASE = "https://financialmodelingprep.com/api/v3"
 _FMP_STABLE_BASE = "https://financialmodelingprep.com/stable"
-_FMP_BASE = _FMP_V3_BASE  # backward-compatible default for legacy v3 endpoints
+_FMP_BASE = _FMP_V3_BASE
+
 
 def _get_fmp_key():
-    """Load the FMP key the standard Streamlit way.
+    """Load the FMP key for Streamlit Cloud or local runs.
 
-    Streamlit Cloud:
-        Manage app -> Settings -> Secrets
+    Streamlit Cloud secrets:
         FMP_API_KEY = "your_key"
 
-    Also supports local environment variables and nested secrets such as:
-        [fmp]
-        api_key = "your_key"
+    Local PowerShell:
+        $env:FMP_API_KEY="your_key"
     """
+    # Streamlit Secrets: flat keys
     try:
         for name in ("FMP_API_KEY", "fmp_api_key", "FINANCIAL_MODELING_PREP_API_KEY"):
-            key = st.secrets.get(name, "")
+            try:
+                key = st.secrets.get(name, "")
+            except Exception:
+                key = ""
             if key:
                 return str(key).strip()
     except Exception:
         pass
+
+    # Streamlit Secrets: nested section [fmp]
     try:
-        fmp_section = st.secrets.get("fmp", {})
-        if isinstance(fmp_section, dict):
+        section = st.secrets.get("fmp", {})
+        if isinstance(section, dict):
             for name in ("api_key", "FMP_API_KEY", "key"):
-                key = fmp_section.get(name, "")
+                key = section.get(name, "")
                 if key:
                     return str(key).strip()
     except Exception:
         pass
+
+    # Local environment variables
     for name in ("FMP_API_KEY", "fmp_api_key", "FINANCIAL_MODELING_PREP_API_KEY"):
         key = _os.environ.get(name, "")
         if key:
@@ -586,9 +593,11 @@ _FMP_SYMBOL_MAP = {
     "BTC-USD": "BTCUSD", "ETH-USD": "ETHUSD",
 }
 
+
 def _fmp_symbol(symbol):
     s = str(symbol or "").upper().strip()
     return _FMP_SYMBOL_MAP.get(s, s)
+
 
 def _period_to_days(period, default=730):
     txt = str(period or "2y").lower().strip()
@@ -600,87 +609,55 @@ def _period_to_days(period, default=730):
     n, unit = int(m.group(1)), m.group(2)
     return n if unit == "d" else n * 30 if unit == "mo" else n * 365
 
-def _normalize_ohlcv(df):
-    if df is None or df.empty:
-        return pd.DataFrame()
-    out = df.copy()
-    if "date" in out.columns:
-        out["date"] = pd.to_datetime(out["date"], errors="coerce")
-        out = out.dropna(subset=["date"]).set_index("date")
-    elif not isinstance(out.index, pd.DatetimeIndex):
-        return pd.DataFrame()
-    out = out.sort_index()
-    out = out.rename(columns={"open":"Open", "high":"High", "low":"Low", "close":"Close", "adjClose":"Adj Close", "volume":"Volume"})
-    for col in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
-    if "Close" not in out.columns and "Adj Close" in out.columns:
-        out["Close"] = out["Adj Close"]
-    keep = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in out.columns]
-    return out[keep].dropna(subset=["Close"])
 
 def _remember_fmp_error(message):
-    """Store the latest FMP error without exposing the API key."""
     try:
-        st.session_state["_last_fmp_error"] = clean_text(str(message))[:500]
+        st.session_state["_last_fmp_error"] = clean_text(str(message))[:800]
     except Exception:
         pass
 
 
 def _fmp_get(endpoint, params=None, base="v3"):
-    """Make a single FMP API call and return parsed JSON or None.
+    """Call FMP and return JSON, rejecting API-error payloads.
 
-    base="v3" uses legacy endpoints such as /api/v3/profile/AAPL.
-    base="stable" uses current endpoints such as /stable/historical-price-eod/full?symbol=AAPL.
-
-    This function rejects FMP error payloads so the app does not accidentally
-    treat an API-key/subscription error as valid market data.
+    base="v3":     https://financialmodelingprep.com/api/v3/<endpoint>
+    base="stable": https://financialmodelingprep.com/stable/<endpoint>
     """
     try:
         key = _get_fmp_key()
         if not key:
-            _remember_fmp_error("FMP_API_KEY is missing in the Streamlit process.")
+            _remember_fmp_error("FMP_API_KEY is missing in Streamlit Secrets/environment.")
             return None
 
+        endpoint = str(endpoint).lstrip("/")
+        base_url = _FMP_STABLE_BASE if str(base).lower() == "stable" else _FMP_V3_BASE
         p = dict(params or {})
         p["apikey"] = key
-
-        base_url = _FMP_STABLE_BASE if str(base).lower() == "stable" else _FMP_V3_BASE
-        endpoint = str(endpoint).lstrip("/")
-        url = f"{base_url}/{endpoint}"
-
-        r = requests.get(url, params=p, timeout=25)
+        r = requests.get(f"{base_url}/{endpoint}", params=p, timeout=25)
 
         if r.status_code != 200:
-            _remember_fmp_error(f"FMP HTTP {r.status_code} from {base_url}/{endpoint}: {r.text[:300]}")
+            _remember_fmp_error(f"FMP HTTP {r.status_code} from /{endpoint}: {r.text[:500]}")
             return None
-
         try:
             data = r.json()
         except Exception:
-            _remember_fmp_error(f"FMP returned non-JSON response from {base_url}/{endpoint}: {r.text[:300]}")
+            _remember_fmp_error(f"FMP returned non-JSON from /{endpoint}: {r.text[:500]}")
             return None
 
-        # FMP error responses are usually dicts like {"Error Message": ...}
-        # or {"error": ...}. Do not pass them downstream as real data.
         if isinstance(data, dict):
             lowered = {str(k).lower(): v for k, v in data.items()}
-            error_keys = {"error message", "error"}
-            if any(k in lowered for k in error_keys):
-                _remember_fmp_error(str(data)[:500])
+            if "error" in lowered or "error message" in lowered:
+                _remember_fmp_error(str(data)[:800])
                 return None
-            # Some endpoints return {"message": "..."} for plan/key problems.
-            if "message" in lowered and not any(k in lowered for k in ["historical", "symbol", "date", "price", "results"]):
-                _remember_fmp_error(str(data)[:500])
+            if "message" in lowered and not any(k in lowered for k in ("historical", "symbol", "date", "price", "results", "data")):
+                _remember_fmp_error(str(data)[:800])
                 return None
             return data if data else None
-
         if isinstance(data, list):
-            return data if len(data) > 0 else None
-
+            return data if len(data) else None
         return None
     except Exception as e:
-        _remember_fmp_error(f"FMP request failed: {e}")
+        _remember_fmp_error(f"FMP request failed for {endpoint}: {e}")
         return None
 
 
@@ -688,300 +665,210 @@ def _fmp_get_stable(endpoint, params=None):
     return _fmp_get(endpoint, params=params, base="stable")
 
 
+def _records(data):
+    """Normalize common FMP response shapes to a list of dicts."""
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return [x for x in data if isinstance(x, dict)]
+    if isinstance(data, dict):
+        for key in ("historical", "results", "data", "values"):
+            val = data.get(key)
+            if isinstance(val, list):
+                return [x for x in val if isinstance(x, dict)]
+        # Some stable endpoints return one record as a dict.
+        if any(k in data for k in ("symbol", "date", "price", "marketCap", "mktCap", "companyName")):
+            return [data]
+    return []
 
-def _fmp_build_info(ticker):
-    """Build a app-compatible info dict from FMP endpoints."""
-    info = {}
+
+def _first(data):
+    rows = _records(data)
+    return rows[0] if rows else {}
+
+
+def _num(*values, default=None):
+    for v in values:
+        if v is None or v == "" or v == "None":
+            continue
+        try:
+            if isinstance(v, str):
+                v = v.replace(",", "").replace("$", "").replace("%", "").strip()
+            x = float(v)
+            if np.isfinite(x):
+                return x
+        except Exception:
+            continue
+    return default
+
+
+def _text(*values, default=""):
+    for v in values:
+        if v is None:
+            continue
+        s = str(v).strip()
+        if s and s.lower() not in {"none", "nan", "null"}:
+            return s
+    return default
+
+
+def _pct_to_decimal(v):
+    x = _num(v, default=None)
+    if x is None:
+        return None
+    # FMP ratios usually return decimals already. If something comes as 12.3, treat it as percent.
+    return x / 100 if abs(x) > 3 else x
+
+
+def _parse_range_high_low(range_value):
+    if not range_value:
+        return None, None
     try:
-        # Profile — company info + fundamentals
-        profile = _fmp_get(f"profile/{_fmp_symbol(ticker)}")
-        if profile and isinstance(profile, list):
-            p = profile[0]
-            info.update({
-                "shortName":             p.get("companyName", ticker),
-                "longName":              p.get("companyName", ticker),
-                "symbol":                p.get("symbol", ticker),
-                "sector":                p.get("sector", ""),
-                "industry":              p.get("industry", ""),
-                "country":               p.get("country", ""),
-                "website":               p.get("website", ""),
-                "longBusinessSummary":   p.get("description", ""),
-                "fullTimeEmployees":     p.get("fullTimeEmployees", 0),
-                "exchange":              p.get("exchangeShortName", ""),
-                "currency":              p.get("currency", "USD"),
-                "regularMarketPrice":    p.get("price", 0),
-                "marketCap":             p.get("mktCap", 0),
-                "beta":                  p.get("beta", 1.0),
-                "dividendYield":         (p.get("lastDiv", 0) / p.get("price", 1)) if p.get("price") else 0,
-                "fiftyTwoWeekHigh":      p.get("range", "0-0").split("-")[-1] if p.get("range") else 0,
-                "fiftyTwoWeekLow":       p.get("range", "0-0").split("-")[0] if p.get("range") else 0,
-                "logo_url":              p.get("image", ""),
-            })
+        parts = str(range_value).replace(" ", "").split("-")
+        if len(parts) >= 2:
+            lo = _num(parts[0], default=None)
+            hi = _num(parts[-1], default=None)
+            return hi, lo
+    except Exception:
+        pass
+    return None, None
 
-        # Key metrics — valuation ratios
-        metrics = _fmp_get(f"key-metrics-ttm/{_fmp_symbol(ticker)}")
-        if metrics and isinstance(metrics, list):
-            m = metrics[0]
-            info.update({
-                "trailingPE":                    m.get("peRatioTTM", 0),
-                "forwardPE":                     m.get("priceToEarningsRatioTTM", 0),
-                "priceToSalesTrailing12Months":  m.get("priceToSalesRatioTTM", 0),
-                "priceToBook":                   m.get("pbRatioTTM", 0),
-                "pegRatio":                      m.get("pegRatioTTM", 0),
-                "enterpriseToEbitda":            m.get("evToEBITDATTM", 0),
-                "enterpriseToRevenue":           m.get("evToSalesRatioTTM", 0),
-                "returnOnEquity":                m.get("roeTTM", 0),
-                "returnOnAssets":                m.get("roaTTM", 0),
-                "debtToEquity":                  m.get("debtToEquityTTM", 0) * 100,
-                "currentRatio":                  m.get("currentRatioTTM", 0),
-                "quickRatio":                    m.get("quickRatioTTM", 0),
-                "dividendYield":                 m.get("dividendYieldTTM", 0),
-                "payoutRatio":                   m.get("payoutRatioTTM", 0),
-                "sharesOutstanding":             m.get("marketCapTTM", 0) / max(info.get("regularMarketPrice", 1), 1),
-            })
 
-        # Financial ratios — margins and growth
-        ratios = _fmp_get(f"ratios-ttm/{_fmp_symbol(ticker)}")
-        if ratios and isinstance(ratios, list):
-            r = ratios[0]
-            info.update({
-                "profitMargins":   r.get("netProfitMarginTTM", 0),
-                "grossMargins":    r.get("grossProfitMarginTTM", 0),
-                "operatingMargins":r.get("operatingProfitMarginTTM", 0),
-                "ebitdaMargins":   r.get("ebitdaPerShareTTM", 0),
-            })
+def _merge_nonempty(target, updates):
+    for k, v in (updates or {}).items():
+        if v is None or v == "" or (isinstance(v, float) and not np.isfinite(v)):
+            continue
+        # Do not overwrite a real nonzero value with zero from a weaker endpoint.
+        if k in target and target[k] not in (None, "", 0, 0.0) and v in (0, 0.0):
+            continue
+        target[k] = v
+    return target
 
-        # Income statement — revenue, earnings
-        income = _fmp_get(f"income-statement/{_fmp_symbol(ticker)}", {"limit": 2})
-        if income and isinstance(income, list) and len(income) >= 1:
-            latest = income[0]
-            prev   = income[1] if len(income) > 1 else {}
-            rev_now  = latest.get("revenue", 0)
-            rev_prev = prev.get("revenue", 1) or 1
-            eps_now  = latest.get("eps", 0)
-            eps_prev = prev.get("eps", 1) or 1
-            info.update({
-                "totalRevenue":    rev_now,
-                "netIncomeToCommon": latest.get("netIncome", 0),
-                "ebitda":          latest.get("ebitda", 0),
-                "revenueGrowth":   (rev_now - rev_prev) / abs(rev_prev) if rev_prev else 0,
-                "earningsGrowth":  (eps_now - eps_prev) / abs(eps_prev) if eps_prev else 0,
-                "trailingEps":     eps_now,
-                "forwardEps":      latest.get("epsdiluted", eps_now),
-            })
 
-        # Balance sheet — debt, cash
-        balance = _fmp_get(f"balance-sheet-statement/{_fmp_symbol(ticker)}", {"limit": 1})
-        if balance and isinstance(balance, list):
-            b = balance[0]
-            info.update({
-                "totalDebt":       b.get("totalDebt", 0),
-                "totalCash":       b.get("cashAndCashEquivalents", 0),
-                "bookValue":       b.get("totalStockholdersEquity", 0),
-            })
+def _normalize_ohlcv(df):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
 
-        # Cash flow — free cash flow
-        cashflow = _fmp_get(f"cash-flow-statement/{_fmp_symbol(ticker)}", {"limit": 1})
-        if cashflow and isinstance(cashflow, list):
-            c = cashflow[0]
-            info.update({
-                "freeCashflow":    c.get("freeCashFlow", 0),
-                "operatingCashflow": c.get("operatingCashFlow", 0),
-            })
+    # FMP stable light can return label/date and price instead of close.
+    rename_map = {
+        "date": "date", "label": "date",
+        "open": "Open", "adjOpen": "Open",
+        "high": "High", "adjHigh": "High",
+        "low": "Low", "adjLow": "Low",
+        "close": "Close", "adjClose": "Close", "price": "Close",
+        "volume": "Volume",
+    }
+    out = out.rename(columns={k: v for k, v in rename_map.items() if k in out.columns})
 
-        # Analyst estimates
-        estimates = _fmp_get(f"analyst-stock-recommendations/{_fmp_symbol(ticker)}", {"limit": 5})
-        if estimates and isinstance(estimates, list):
-            buys   = sum(e.get("analystRatingsbuy", 0) for e in estimates)
-            holds  = sum(e.get("analystRatingsHold", 0) for e in estimates)
-            sells  = sum(e.get("analystRatingsSell", 0) for e in estimates)
-            total  = buys + holds + sells or 1
-            info.update({
-                "numberOfAnalystOpinions": total,
-                "recommendationMean": 1.5 if buys/total > 0.6 else 3.0 if sells/total > 0.3 else 2.5,
-                "recommendationKey": "buy" if buys/total > 0.6 else "sell" if sells/total > 0.3 else "hold",
-                "targetMeanPrice": 0,
-            })
+    if "date" in out.columns:
+        out["date"] = pd.to_datetime(out["date"], errors="coerce")
+        out = out.dropna(subset=["date"]).set_index("date")
+    elif not isinstance(out.index, pd.DatetimeIndex):
+        return pd.DataFrame()
 
-        # Stable FMP enrichment layer. Some FMP accounts return price history
-        # from /stable but return thin/empty payloads on legacy /api/v3 profile.
-        # This restores visible fields such as Market Cap, 52W range, volume,
-        # company name, sector, industry, beta, and price using current FMP APIs.
-        def _first_row(data):
-            if isinstance(data, list) and data and isinstance(data[0], dict):
-                return data[0]
-            if isinstance(data, dict):
-                return data
-            return {}
+    out = out.sort_index()
+    if "Close" not in out.columns:
+        return pd.DataFrame()
 
-        def _num(v, default=0):
-            try:
-                if v is None or v == "":
-                    return default
-                x = float(str(v).replace(",", ""))
-                return x if np.isfinite(x) else default
-            except Exception:
-                return default
+    # Fill OHLC if the endpoint only gave a close/price series.
+    for col in ("Open", "High", "Low"):
+        if col not in out.columns:
+            out[col] = out["Close"]
+    if "Volume" not in out.columns:
+        out["Volume"] = 0
 
-        def _pick(d, *keys, default=None):
-            for k in keys:
-                if isinstance(d, dict) and d.get(k) not in (None, "", "None", "nan"):
-                    return d.get(k)
-            return default
+    for col in ["Open", "High", "Low", "Close", "Volume"]:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
 
-        stable_profile = _first_row(_fmp_get_stable("profile", {"symbol": _fmp_symbol(ticker)}))
-        if stable_profile:
-            rng = str(_pick(stable_profile, "range", default="") or "")
-            low_52 = high_52 = 0
-            if "-" in rng:
-                parts = rng.replace(" ", "").split("-", 1)
-                low_52, high_52 = _num(parts[0], 0), _num(parts[1], 0)
-            price = _num(_pick(stable_profile, "price", "regularMarketPrice", default=info.get("regularMarketPrice", 0)), 0)
-            mcap = _num(_pick(stable_profile, "marketCap", "mktCap", "marketCapitalization", default=info.get("marketCap", 0)), 0)
-            if price and not _num(info.get("regularMarketPrice"), 0):
-                info["regularMarketPrice"] = price
-                info["currentPrice"] = price
-            if mcap and not _num(info.get("marketCap"), 0):
-                info["marketCap"] = mcap
-
-            info.update({
-                "shortName": info.get("shortName") or _pick(stable_profile, "companyName", "company", "name", default=ticker),
-                "longName": info.get("longName") or _pick(stable_profile, "companyName", "company", "name", default=ticker),
-                "symbol": info.get("symbol") or _pick(stable_profile, "symbol", default=_fmp_symbol(ticker)),
-                "sector": info.get("sector") or _pick(stable_profile, "sector", default=""),
-                "industry": info.get("industry") or _pick(stable_profile, "industry", default=""),
-                "country": info.get("country") or _pick(stable_profile, "country", default=""),
-                "website": info.get("website") or _pick(stable_profile, "website", default=""),
-                "longBusinessSummary": info.get("longBusinessSummary") or _pick(stable_profile, "description", default=""),
-                "fullTimeEmployees": info.get("fullTimeEmployees") or _num(_pick(stable_profile, "fullTimeEmployees", "employees"), 0),
-                "exchange": info.get("exchange") or _pick(stable_profile, "exchangeShortName", "exchange", default=""),
-                "currency": info.get("currency") or _pick(stable_profile, "currency", default="USD"),
-                "beta": info.get("beta") or _num(_pick(stable_profile, "beta"), 1.0),
-                "fiftyTwoWeekHigh": info.get("fiftyTwoWeekHigh") or _num(_pick(stable_profile, "yearHigh", "fiftyTwoWeekHigh"), high_52),
-                "fiftyTwoWeekLow": info.get("fiftyTwoWeekLow") or _num(_pick(stable_profile, "yearLow", "fiftyTwoWeekLow"), low_52),
-                "logo_url": info.get("logo_url") or _pick(stable_profile, "image", "logo", default=""),
-                "ceo": info.get("ceo") or _pick(stable_profile, "ceo", "CEO", default=""),
-            })
-
-        for quote_data in (
-            _fmp_get(f"quote/{_fmp_symbol(ticker)}"),
-            _fmp_get_stable("quote", {"symbol": _fmp_symbol(ticker)}),
-            _fmp_get_stable("quote-short", {"symbol": _fmp_symbol(ticker)}),
-        ):
-            q = _first_row(quote_data)
-            if not q:
-                continue
-            if not _num(info.get("regularMarketPrice"), 0):
-                info["regularMarketPrice"] = _num(_pick(q, "price", "close", "previousClose"), 0)
-                info["currentPrice"] = info["regularMarketPrice"]
-            if not _num(info.get("marketCap"), 0):
-                info["marketCap"] = _num(_pick(q, "marketCap", "mktCap", "marketCapitalization"), 0)
-            info["volume"] = info.get("volume") or _num(_pick(q, "volume"), 0)
-            info["averageVolume"] = info.get("averageVolume") or _num(_pick(q, "avgVolume", "averageVolume"), 0)
-            info["previousClose"] = info.get("previousClose") or _num(_pick(q, "previousClose"), 0)
-            info["open"] = info.get("open") or _num(_pick(q, "open"), 0)
-            info["dayHigh"] = info.get("dayHigh") or _num(_pick(q, "dayHigh", "high"), 0)
-            info["dayLow"] = info.get("dayLow") or _num(_pick(q, "dayLow", "low"), 0)
-            info["trailingPE"] = info.get("trailingPE") or _num(_pick(q, "pe", "peRatio"), 0)
-            info["trailingEps"] = info.get("trailingEps") or _num(_pick(q, "eps", "epsTTM"), 0)
-            info["fiftyTwoWeekHigh"] = info.get("fiftyTwoWeekHigh") or _num(_pick(q, "yearHigh", "fiftyTwoWeekHigh"), 0)
-            info["fiftyTwoWeekLow"] = info.get("fiftyTwoWeekLow") or _num(_pick(q, "yearLow", "fiftyTwoWeekLow"), 0)
-
-        if not _num(info.get("marketCap"), 0):
-            mc = _first_row(_fmp_get_stable("market-capitalization", {"symbol": _fmp_symbol(ticker)}))
-            info["marketCap"] = _num(_pick(mc, "marketCap", "marketCapTTM", "value", "marketCapitalization"), 0)
-
-    except Exception as e:
-        _remember_fmp_error(f"FMP info loader failed for {ticker}: {e}")
-
-    return info if info else None
+    return out[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
 
 
 def _fmp_build_hist(ticker, period="2y"):
-    """Fetch OHLCV daily history from FMP only.
-
-    Uses FMP's usual v3 endpoint first:
-        /api/v3/historical-price-full/AAPL?timeseries=730&apikey=...
-
-    Then tries date-filtered v3 and stable endpoints.
-    """
+    """Fetch OHLCV history from FMP. Tries multiple current and legacy response shapes."""
+    sym = _fmp_symbol(ticker)
+    days = _period_to_days(period, default=730)
     try:
-        from datetime import datetime, timedelta
-        sym = _fmp_symbol(ticker)
-        days = _period_to_days(period, default=730)
-        date_from = (datetime.today() - timedelta(days=days)).strftime("%Y-%m-%d")
-        date_to = datetime.today().strftime("%Y-%m-%d")
+        date_to = pd.Timestamp.today().strftime("%Y-%m-%d")
+        date_from = (pd.Timestamp.today() - pd.Timedelta(days=days + 10)).strftime("%Y-%m-%d")
 
-        candidates = [
-            ("v3", f"historical-price-full/{sym}", {"timeseries": int(days)}),
-            ("v3", f"historical-price-full/{sym}", {"from": date_from, "to": date_to}),
-            ("stable", "historical-price-eod/full", {"symbol": sym, "from": date_from, "to": date_to}),
-            ("stable", "historical-price-eod/light", {"symbol": sym, "from": date_from, "to": date_to}),
+        attempts = [
+            ("historical-price-full/" + sym, {"timeseries": days}, "v3"),
+            ("historical-price-full/" + sym, {"from": date_from, "to": date_to}, "v3"),
+            ("historical-price-eod/full", {"symbol": sym, "from": date_from, "to": date_to}, "stable"),
+            ("historical-price-eod/light", {"symbol": sym, "from": date_from, "to": date_to}, "stable"),
+            ("historical-price-eod/full", {"symbol": sym}, "stable"),
+            ("historical-price-eod/light", {"symbol": sym}, "stable"),
         ]
-
-        for base, endpoint, params in candidates:
+        for endpoint, params, base in attempts:
             data = _fmp_get(endpoint, params=params, base=base)
-            if not data:
+            rows = _records(data)
+            if not rows:
                 continue
-            historical = []
-            if isinstance(data, dict):
-                historical = data.get("historical") or data.get("data") or data.get("results") or []
-                if not historical and any(k in data for k in ("date", "close", "adjClose")):
-                    historical = [data]
-            elif isinstance(data, list):
-                historical = data
-            if historical:
-                df = _normalize_ohlcv(pd.DataFrame(historical))
-                if not df.empty:
-                    return df
+            df = _normalize_ohlcv(pd.DataFrame(rows))
+            if not df.empty:
+                if len(df) > days + 5:
+                    df = df.tail(days)
+                return df
 
-        quote = _fmp_get(f"quote/{sym}", base="v3")
-        if isinstance(quote, list) and quote:
-            q = quote[0]
-            price = q.get("price") or q.get("previousClose")
-            if price is not None:
-                today = pd.Timestamp.today().normalize()
-                return pd.DataFrame({
-                    "Open": [q.get("open", price)],
-                    "High": [q.get("dayHigh", price)],
-                    "Low": [q.get("dayLow", price)],
-                    "Close": [price],
-                    "Volume": [q.get("volume", 0)],
-                }, index=[today]).apply(pd.to_numeric, errors="coerce")
-
+        # Last-resort one-row quote so the UI does not fully break.
+        q = _first(_fmp_get("quote/" + sym, base="v3")) or _first(_fmp_get("quote", {"symbol": sym}, base="stable"))
+        price = _num(q.get("price"), q.get("previousClose"), q.get("close"), default=None)
+        if price is not None:
+            idx = [pd.Timestamp.today().normalize()]
+            return pd.DataFrame({
+                "Open": [_num(q.get("open"), default=price)],
+                "High": [_num(q.get("dayHigh"), q.get("high"), default=price)],
+                "Low": [_num(q.get("dayLow"), q.get("low"), default=price)],
+                "Close": [price],
+                "Volume": [_num(q.get("volume"), default=0)],
+            }, index=idx)
         return pd.DataFrame()
     except Exception as e:
-        _remember_fmp_error(f"FMP historical loader failed for {ticker}: {e}")
+        _remember_fmp_error(f"FMP historical loader failed for {sym}: {e}")
         return pd.DataFrame()
 
+
 def _fmp_build_intraday(ticker, period="5d", interval="5m"):
-    """Fetch intraday bars from FMP. Requires an FMP plan that includes historical-chart endpoints."""
     interval_map = {
         "1m": "1min", "2m": "1min", "5m": "5min", "15m": "15min", "30m": "30min",
         "60m": "1hour", "90m": "1hour", "1h": "1hour", "1hour": "1hour", "4h": "4hour", "4hour": "4hour",
     }
     fmp_interval = interval_map.get(str(interval).lower(), str(interval).lower())
+    sym = _fmp_symbol(ticker)
     try:
-        data = _fmp_get(f"historical-chart/{fmp_interval}/{_fmp_symbol(ticker)}")
-        if not data:
-            return pd.DataFrame()
-        df = _normalize_ohlcv(pd.DataFrame(data))
+        data = _fmp_get(f"historical-chart/{fmp_interval}/{sym}", base="v3")
+        df = _normalize_ohlcv(pd.DataFrame(_records(data))) if data else pd.DataFrame()
         if df.empty:
             return df
         cutoff = pd.Timestamp.today() - pd.Timedelta(days=_period_to_days(period, default=30))
-        if isinstance(df.index, pd.DatetimeIndex):
-            df = df[df.index >= cutoff]
-        return df
-    except Exception:
+        return df[df.index >= cutoff]
+    except Exception as e:
+        _remember_fmp_error(f"FMP intraday loader failed for {sym}: {e}")
         return pd.DataFrame()
 
 
-def _fmp_statement_df(endpoint, ticker, limit=8):
-    """Return FMP statements in a app-compatible shape: rows=line items, columns=period dates."""
-    data = _fmp_get(f"{endpoint}/{_fmp_symbol(ticker)}", {"limit": limit})
-    if not data or not isinstance(data, list):
+def _fmp_statement_rows(endpoint, ticker, limit=8, period=None):
+    sym = _fmp_symbol(ticker)
+    rows = []
+    params = {"limit": limit}
+    if period:
+        params["period"] = period
+    # Try stable first, then v3.
+    stable_params = {"symbol": sym, "limit": limit}
+    if period:
+        stable_params["period"] = period
+    rows = _records(_fmp_get(endpoint, stable_params, base="stable"))
+    if not rows:
+        rows = _records(_fmp_get(f"{endpoint}/{sym}", params, base="v3"))
+    return rows
+
+
+def _fmp_statement_df(endpoint, ticker, limit=8, period=None):
+    rows = _fmp_statement_rows(endpoint, ticker, limit=limit, period=period)
+    if not rows:
         return pd.DataFrame()
-    df = pd.DataFrame(data)
+    df = pd.DataFrame(rows)
     if df.empty or "date" not in df.columns:
         return pd.DataFrame()
     drop_cols = {"date", "symbol", "reportedCurrency", "cik", "fillingDate", "acceptedDate", "calendarYear", "period", "link", "finalLink"}
@@ -991,30 +878,226 @@ def _fmp_statement_df(endpoint, ticker, limit=8):
     return out
 
 
+def _fmp_build_info(ticker):
+    """Build a Yahoo-compatible info dict from FMP.
+
+    The rest of the app expects yfinance-style keys. This function is the adapter:
+    it fetches from several FMP endpoints, then maps FMP names into the exact
+    keys used by Overview, Valuation, Risk, DCF, Industry, and AI Thesis.
+    """
+    sym = _fmp_symbol(ticker)
+    info = {"symbol": sym, "quoteType": "EQUITY"}
+
+    try:
+        # --- Profile / quote / market-cap core ---------------------------------
+        profile = _first(_fmp_get("profile", {"symbol": sym}, base="stable"))
+        if not profile:
+            profile = _first(_fmp_get(f"profile/{sym}", base="v3"))
+
+        quote = _first(_fmp_get("quote", {"symbol": sym}, base="stable"))
+        if not quote:
+            quote = _first(_fmp_get(f"quote/{sym}", base="v3"))
+
+        market_cap_record = _first(_fmp_get("market-capitalization", {"symbol": sym}, base="stable"))
+        if not market_cap_record:
+            market_cap_record = _first(_fmp_get(f"market-capitalization/{sym}", base="v3"))
+
+        hi_from_range, lo_from_range = _parse_range_high_low(profile.get("range"))
+        price = _num(quote.get("price"), quote.get("currentPrice"), profile.get("price"), default=None)
+        market_cap = _num(
+            quote.get("marketCap"), profile.get("mktCap"), profile.get("marketCap"),
+            market_cap_record.get("marketCap"), market_cap_record.get("marketCapTTM"), default=None
+        )
+
+        _merge_nonempty(info, {
+            "shortName": _text(profile.get("companyName"), profile.get("companyNameTTM"), profile.get("name"), quote.get("name"), sym),
+            "longName": _text(profile.get("companyName"), profile.get("name"), quote.get("name"), sym),
+            "symbol": _text(profile.get("symbol"), quote.get("symbol"), sym),
+            "sector": _text(profile.get("sector"), default=""),
+            "industry": _text(profile.get("industry"), default=""),
+            "country": _text(profile.get("country"), default=""),
+            "website": _text(profile.get("website"), default=""),
+            "longBusinessSummary": _text(profile.get("description"), profile.get("companyDescription"), default=""),
+            "fullTimeEmployees": _num(profile.get("fullTimeEmployees"), profile.get("employees"), default=None),
+            "exchange": _text(profile.get("exchangeShortName"), profile.get("exchange"), quote.get("exchange"), default=""),
+            "currency": _text(profile.get("currency"), quote.get("currency"), default="USD"),
+            "ceo": _text(profile.get("ceo"), default=""),
+            "logo_url": _text(profile.get("image"), default=""),
+            "regularMarketPrice": price,
+            "currentPrice": price,
+            "previousClose": _num(quote.get("previousClose"), quote.get("priceAvg50"), default=None),
+            "open": _num(quote.get("open"), default=None),
+            "dayHigh": _num(quote.get("dayHigh"), quote.get("high"), default=None),
+            "dayLow": _num(quote.get("dayLow"), quote.get("low"), default=None),
+            "marketCap": market_cap,
+            "volume": _num(quote.get("volume"), profile.get("volAvg"), default=None),
+            "averageVolume": _num(quote.get("avgVolume"), profile.get("volAvg"), quote.get("avgVolume10D"), default=None),
+            "beta": _num(profile.get("beta"), default=None),
+            "fiftyTwoWeekHigh": _num(quote.get("yearHigh"), quote.get("fiftyTwoWeekHigh"), profile.get("fiftyTwoWeekHigh"), hi_from_range, default=None),
+            "fiftyTwoWeekLow": _num(quote.get("yearLow"), quote.get("fiftyTwoWeekLow"), profile.get("fiftyTwoWeekLow"), lo_from_range, default=None),
+            "trailingPE": _num(quote.get("pe"), quote.get("peRatio"), profile.get("pe"), default=None),
+            "trailingEps": _num(quote.get("eps"), profile.get("eps"), default=None),
+            "sharesOutstanding": _num(quote.get("sharesOutstanding"), profile.get("sharesOutstanding"), default=None),
+            "floatShares": _num(profile.get("floatShares"), profile.get("float"), default=None),
+            "dividendYield": _pct_to_decimal(profile.get("lastDiv")) if price in (None, 0) else None,
+        })
+        if profile.get("lastDiv") is not None and price not in (None, 0):
+            info["dividendYield"] = _num(profile.get("lastDiv"), default=0) / price
+
+        # --- Key metrics / ratios / enterprise value ----------------------------
+        key_metrics = _first(_fmp_get("key-metrics-ttm", {"symbol": sym}, base="stable"))
+        if not key_metrics:
+            key_metrics = _first(_fmp_get(f"key-metrics-ttm/{sym}", base="v3"))
+
+        ratios = _first(_fmp_get("ratios-ttm", {"symbol": sym}, base="stable"))
+        if not ratios:
+            ratios = _first(_fmp_get(f"ratios-ttm/{sym}", base="v3"))
+
+        ev_row = _first(_fmp_get("enterprise-values", {"symbol": sym, "limit": 1}, base="stable"))
+        if not ev_row:
+            ev_row = _first(_fmp_get(f"enterprise-values/{sym}", {"limit": 1}, base="v3"))
+
+        _merge_nonempty(info, {
+            "trailingPE": _num(key_metrics.get("peRatioTTM"), ratios.get("priceEarningsRatioTTM"), quote.get("pe"), info.get("trailingPE"), default=None),
+            "forwardPE": _num(key_metrics.get("priceToEarningsRatioTTM"), key_metrics.get("peRatioTTM"), ratios.get("priceEarningsRatioTTM"), default=None),
+            "priceToSalesTrailing12Months": _num(key_metrics.get("priceToSalesRatioTTM"), ratios.get("priceToSalesRatioTTM"), default=None),
+            "priceToBook": _num(key_metrics.get("pbRatioTTM"), key_metrics.get("priceToBookRatioTTM"), ratios.get("priceToBookRatioTTM"), default=None),
+            "pegRatio": _num(key_metrics.get("pegRatioTTM"), ratios.get("priceEarningsToGrowthRatioTTM"), default=None),
+            "enterpriseToEbitda": _num(key_metrics.get("evToEBITDATTM"), key_metrics.get("enterpriseValueOverEBITDATTM"), default=None),
+            "enterpriseToRevenue": _num(key_metrics.get("evToSalesRatioTTM"), key_metrics.get("evToSalesRatioTTM"), default=None),
+            "returnOnEquity": _pct_to_decimal(key_metrics.get("roeTTM")) if key_metrics.get("roeTTM") is not None else _pct_to_decimal(ratios.get("returnOnEquityTTM")),
+            "returnOnAssets": _pct_to_decimal(key_metrics.get("roaTTM")) if key_metrics.get("roaTTM") is not None else _pct_to_decimal(ratios.get("returnOnAssetsTTM")),
+            "debtToEquity": _num(key_metrics.get("debtToEquityTTM"), ratios.get("debtEquityRatioTTM"), ratios.get("debtToEquityRatioTTM"), default=None),
+            "currentRatio": _num(key_metrics.get("currentRatioTTM"), ratios.get("currentRatioTTM"), default=None),
+            "quickRatio": _num(key_metrics.get("quickRatioTTM"), ratios.get("quickRatioTTM"), default=None),
+            "dividendYield": _pct_to_decimal(key_metrics.get("dividendYieldTTM")) if key_metrics.get("dividendYieldTTM") is not None else info.get("dividendYield"),
+            "payoutRatio": _pct_to_decimal(key_metrics.get("payoutRatioTTM")) if key_metrics.get("payoutRatioTTM") is not None else _pct_to_decimal(ratios.get("payoutRatioTTM")),
+        })
+
+        # --- Statements: revenue, net income, EBITDA, debt, cash, FCF ------------
+        income_rows = _fmp_statement_rows("income-statement", sym, limit=4)
+        latest_income = income_rows[0] if income_rows else {}
+        prev_income = income_rows[1] if len(income_rows) > 1 else {}
+        rev_now = _num(latest_income.get("revenue"), default=None)
+        rev_prev = _num(prev_income.get("revenue"), default=None)
+        eps_now = _num(latest_income.get("eps"), latest_income.get("epsdiluted"), info.get("trailingEps"), default=None)
+        eps_prev = _num(prev_income.get("eps"), prev_income.get("epsdiluted"), default=None)
+        revenue_growth = (rev_now - rev_prev) / abs(rev_prev) if rev_now is not None and rev_prev not in (None, 0) else None
+        earnings_growth = (eps_now - eps_prev) / abs(eps_prev) if eps_now is not None and eps_prev not in (None, 0) else None
+
+        balance_rows = _fmp_statement_rows("balance-sheet-statement", sym, limit=2)
+        latest_balance = balance_rows[0] if balance_rows else {}
+
+        cash_rows = _fmp_statement_rows("cash-flow-statement", sym, limit=2)
+        latest_cash = cash_rows[0] if cash_rows else {}
+
+        # Some FMP plans expose growth separately; use it if statement-derived growth is missing.
+        growth = _first(_fmp_get("financial-growth", {"symbol": sym, "limit": 1}, base="stable"))
+        if not growth:
+            growth = _first(_fmp_get(f"financial-growth/{sym}", {"limit": 1}, base="v3"))
+
+        _merge_nonempty(info, {
+            "totalRevenue": rev_now,
+            "netIncomeToCommon": _num(latest_income.get("netIncome"), latest_income.get("netIncomeCommonStockholders"), default=None),
+            "ebitda": _num(latest_income.get("ebitda"), default=None),
+            "revenueGrowth": revenue_growth if revenue_growth is not None else _pct_to_decimal(growth.get("revenueGrowth")),
+            "earningsGrowth": earnings_growth if earnings_growth is not None else _pct_to_decimal(growth.get("epsgrowth"),),
+            "trailingEps": eps_now,
+            "forwardEps": _num(latest_income.get("epsdiluted"), eps_now, default=None),
+            "totalDebt": _num(latest_balance.get("totalDebt"), latest_balance.get("shortTermDebt"), default=None),
+            "totalCash": _num(latest_balance.get("cashAndCashEquivalents"), latest_balance.get("cashAndShortTermInvestments"), default=None),
+            "bookValue": _num(latest_balance.get("totalStockholdersEquity"), latest_balance.get("totalEquity"), default=None),
+            "freeCashflow": _num(latest_cash.get("freeCashFlow"), default=None),
+            "operatingCashflow": _num(latest_cash.get("operatingCashFlow"), latest_cash.get("netCashProvidedByOperatingActivities"), default=None),
+            "interestExpense": _num(latest_income.get("interestExpense"), default=None),
+        })
+
+        # --- Margins after revenue/EBITDA/net income are known ------------------
+        gross_margin = _pct_to_decimal(ratios.get("grossProfitMarginTTM"))
+        op_margin = _pct_to_decimal(ratios.get("operatingProfitMarginTTM")) or _pct_to_decimal(ratios.get("operatingProfitMargin"))
+        net_margin = _pct_to_decimal(ratios.get("netProfitMarginTTM"))
+        ebitda_margin = _pct_to_decimal(ratios.get("ebitdaMarginTTM"))
+        if rev_now not in (None, 0):
+            gross_margin = gross_margin if gross_margin is not None else _num(latest_income.get("grossProfit"), default=0) / rev_now
+            op_margin = op_margin if op_margin is not None else _num(latest_income.get("operatingIncome"), default=0) / rev_now
+            net_margin = net_margin if net_margin is not None else _num(latest_income.get("netIncome"), default=0) / rev_now
+            ebitda_margin = ebitda_margin if ebitda_margin is not None else _num(latest_income.get("ebitda"), default=0) / rev_now
+        _merge_nonempty(info, {
+            "grossMargins": gross_margin,
+            "operatingMargins": op_margin,
+            "profitMargins": net_margin,
+            "ebitdaMargins": ebitda_margin,
+        })
+
+        # Better share count if market cap and price are available.
+        if not info.get("sharesOutstanding") and info.get("marketCap") and info.get("regularMarketPrice"):
+            info["sharesOutstanding"] = info["marketCap"] / max(info["regularMarketPrice"], 1e-9)
+
+        # --- Analyst/target fields ---------------------------------------------
+        target = _first(_fmp_get("price-target-consensus", {"symbol": sym}, base="stable"))
+        if not target:
+            target = _first(_fmp_get(f"price-target-consensus/{sym}", base="v3"))
+        rating = _first(_fmp_get("ratings-snapshot", {"symbol": sym}, base="stable"))
+        recommendations = _records(_fmp_get("analyst-stock-recommendations", {"symbol": sym, "limit": 5}, base="stable"))
+        if not recommendations:
+            recommendations = _records(_fmp_get(f"analyst-stock-recommendations/{sym}", {"limit": 5}, base="v3"))
+
+        rec_key, rec_mean, rec_total = None, None, None
+        if recommendations:
+            r = recommendations[0]
+            buys = _num(r.get("analystRatingsbuy"), r.get("analystRatingsBuy"), r.get("buy"), default=0) or 0
+            holds = _num(r.get("analystRatingsHold"), r.get("hold"), default=0) or 0
+            sells = _num(r.get("analystRatingsSell"), r.get("sell"), default=0) or 0
+            strong_buys = _num(r.get("analystRatingsStrongBuy"), r.get("strongBuy"), default=0) or 0
+            strong_sells = _num(r.get("analystRatingsStrongSell"), r.get("strongSell"), default=0) or 0
+            rec_total = buys + holds + sells + strong_buys + strong_sells
+            bullish = buys + strong_buys
+            bearish = sells + strong_sells
+            if rec_total:
+                rec_key = "buy" if bullish / rec_total >= 0.55 else "sell" if bearish / rec_total >= 0.35 else "hold"
+                rec_mean = 1.8 if rec_key == "buy" else 4.0 if rec_key == "sell" else 3.0
+
+        _merge_nonempty(info, {
+            "targetLowPrice": _num(target.get("targetLow"), target.get("targetLowPrice"), default=None),
+            "targetMeanPrice": _num(target.get("targetConsensus"), target.get("targetMeanPrice"), target.get("priceTargetAverage"), default=None),
+            "targetHighPrice": _num(target.get("targetHigh"), target.get("targetHighPrice"), default=None),
+            "numberOfAnalystOpinions": _num(target.get("numberOfAnalysts"), rec_total, default=None),
+            "recommendationKey": rec_key or _text(rating.get("ratingRecommendation"), rating.get("rating"), default=""),
+            "recommendationMean": rec_mean or _num(rating.get("ratingScore"), default=None),
+        })
+
+        # UI safety defaults: keep keys present without hiding real missing values as strings.
+        info.setdefault("shortName", sym)
+        info.setdefault("longName", info.get("shortName", sym))
+        return info
+    except Exception as e:
+        _remember_fmp_error(f"FMP info builder failed for {sym}: {e}")
+        return info if info else None
+
+
 def _fmp_news_items(ticker="", limit=50):
     params = {"limit": int(limit)}
     if ticker:
         params["tickers"] = _fmp_symbol(ticker)
-    data = _fmp_get("stock_news", params)
+    data = _fmp_get("stock_news", params, base="v3")
+    if not data:
+        data = _fmp_get("news/stock", {"symbols": _fmp_symbol(ticker), "limit": int(limit)} if ticker else {"limit": int(limit)}, base="stable")
     rows = []
-    if isinstance(data, list):
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            rows.append({
-                "ticker": ticker or clean_text(item.get("symbol", "")),
-                "title": clean_text(item.get("title", "")),
-                "summary": clean_text(item.get("text") or item.get("site") or ""),
-                "publisher": clean_text(item.get("site") or "FMP"),
-                "link": clean_text(item.get("url", "")),
-                "ts": _news_timestamp(item.get("publishedDate")),
-                "source_rank": 1,
-            })
+    for item in _records(data):
+        rows.append({
+            "ticker": ticker or clean_text(item.get("symbol") or item.get("symbols") or ""),
+            "title": clean_text(item.get("title", "")),
+            "summary": clean_text(item.get("text") or item.get("summary") or item.get("site") or ""),
+            "publisher": clean_text(item.get("site") or item.get("publisher") or "FMP"),
+            "link": clean_text(item.get("url") or item.get("link") or ""),
+            "ts": _news_timestamp(item.get("publishedDate") or item.get("date")),
+            "source_rank": 1,
+        })
     return rows
 
 
 class _FMPTicker:
-    """Small app-compatible wrapper backed entirely by FMP."""
+    """Small yfinance-like wrapper backed entirely by FMP."""
     def __init__(self, symbol):
         self.symbol = str(symbol or "").upper().strip()
 
@@ -1037,55 +1120,48 @@ class _FMPTicker:
 
     @property
     def quarterly_financials(self):
-        return _fmp_statement_df("income-statement", self.symbol, limit=8)
+        return _fmp_statement_df("income-statement", self.symbol, limit=8, period="quarter")
 
     @property
     def financials(self):
-        return _fmp_statement_df("income-statement", self.symbol, limit=8)
+        return _fmp_statement_df("income-statement", self.symbol, limit=8, period="annual")
 
     @property
     def quarterly_balance_sheet(self):
-        return _fmp_statement_df("balance-sheet-statement", self.symbol, limit=8)
+        return _fmp_statement_df("balance-sheet-statement", self.symbol, limit=8, period="quarter")
 
     @property
     def balance_sheet(self):
-        return _fmp_statement_df("balance-sheet-statement", self.symbol, limit=8)
+        return _fmp_statement_df("balance-sheet-statement", self.symbol, limit=8, period="annual")
 
     @property
     def quarterly_cashflow(self):
-        return _fmp_statement_df("cash-flow-statement", self.symbol, limit=8)
+        return _fmp_statement_df("cash-flow-statement", self.symbol, limit=8, period="quarter")
 
     @property
     def cashflow(self):
-        return _fmp_statement_df("cash-flow-statement", self.symbol, limit=8)
+        return _fmp_statement_df("cash-flow-statement", self.symbol, limit=8, period="annual")
 
 
 def _fetch_stock_uncached(ticker, period="2y"):
-    """Fetch stock data using FMP only — no yfinance calls."""
     try:
-        # Step 0: make sure the FMP key is actually available to Streamlit.
         if not _get_fmp_key():
-            return None, "FMP_API_KEY is missing. Add it to your environment variables or Streamlit secrets, then restart Streamlit."
+            return None, "FMP_API_KEY is missing. Add it to Streamlit Secrets, then reboot the app."
 
-        # Step 1: get price history from FMP
         hist = _fmp_build_hist(ticker, period)
         if hist.empty:
             last_err = ""
             try:
                 last_err = st.session_state.get("_last_fmp_error", "")
             except Exception:
-                last_err = ""
+                pass
             detail = f" Last FMP message: {last_err}" if last_err else ""
-            return None, f"No FMP price history returned for '{ticker}'. This usually means the FMP key is invalid/missing in Streamlit, the endpoint is blocked by your plan, or FMP returned an empty response.{detail}"
+            return None, f"No FMP price history returned for '{ticker}'. Check your FMP key/plan or endpoint access.{detail}"
 
-        # Step 2: get fundamentals from FMP
         info = _fmp_build_info(ticker)
         if not info:
-            # Still return with minimal info if history worked
-            info = {"shortName": ticker.upper(), "longName": ticker.upper()}
-
+            info = {"symbol": _fmp_symbol(ticker), "shortName": _fmp_symbol(ticker), "longName": _fmp_symbol(ticker)}
         return {"info": info, "hist": hist}, None
-
     except Exception as e:
         return None, str(e)
 
@@ -1100,13 +1176,9 @@ def fetch_stock(ticker, period="2y"):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_chart_history(ticker, period="1y", interval="1d", prepost=False):
-    """Fetch chart data from FMP only. Intraday requires an FMP plan with historical-chart access."""
     del prepost
     try:
-        if str(interval).lower() in ("1d", "5d", "1wk", "1mo", "3mo"):
-            h = _fmp_build_hist(ticker, period)
-        else:
-            h = _fmp_build_intraday(ticker, period=period, interval=interval)
+        h = _fmp_build_hist(ticker, period) if str(interval).lower() in ("1d", "5d", "1wk", "1mo", "3mo") else _fmp_build_intraday(ticker, period=period, interval=interval)
         if h is not None and not h.empty:
             return h, None
     except Exception as e:
@@ -1123,7 +1195,8 @@ def fetch_peers(tickers: tuple, period="1y"):
             h = s.history(period=period, auto_adjust=True)
             if not h.empty:
                 out[t] = {"info": s.info, "hist": h}
-        except: pass
+        except Exception:
+            pass
     return out
 
 
@@ -1134,12 +1207,6 @@ def fetch_spy(period="2y"):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_financial_reports(ticker):
-    """Fetch the three major statements from FMP.
-
-    Returns quarterly and annual income statement, balance sheet, and cash flow
-    statements.  The UI compares the latest period with the previous period and,
-    when quarterly data has at least five columns, the same quarter last year.
-    """
     try:
         tk = _fmp_ticker(ticker)
         return {
@@ -1156,30 +1223,31 @@ def fetch_financial_reports(ticker):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def search_companies_by_keyword(keyword, max_results=12):
-    """Search listed companies through FMP only and enrich with FMP profiles."""
     keyword = clean_text(keyword or "").strip() if "clean_text" in globals() else str(keyword or "").strip()
     if len(keyword) < 2:
         return []
     rows = []
     try:
-        data = _fmp_get("search", {"query": keyword, "limit": max_results * 3})
-        if isinstance(data, list):
-            for q in data:
-                symbol = str(q.get("symbol") or "").upper().strip()
-                if not symbol:
-                    continue
-                name = str(q.get("name") or symbol).strip()
-                exchange = str(q.get("exchangeShortName") or q.get("stockExchange") or "").strip()
-                info = _fmp_build_info(symbol) or {}
-                rows.append({
-                    "Ticker": symbol,
-                    "Company": info.get("shortName") or info.get("longName") or name,
-                    "Exchange": info.get("exchange") or exchange or "FMP",
-                    "Market Cap": safe_float(info.get("marketCap"), 0) if "safe_float" in globals() else float(info.get("marketCap") or 0),
-                    "Quote Type": "EQUITY",
-                })
+        data = _fmp_get("search", {"query": keyword, "limit": max_results * 3}, base="v3")
+        if not data:
+            data = _fmp_get("search-symbol", {"query": keyword, "limit": max_results * 3}, base="stable")
+        for q in _records(data):
+            symbol = str(q.get("symbol") or "").upper().strip()
+            if not symbol or symbol.startswith("^"):
+                continue
+            name = _text(q.get("name"), q.get("companyName"), symbol)
+            exch = _text(q.get("exchangeShortName"), q.get("stockExchange"), q.get("exchange"), default="FMP")
+            info = _fmp_build_info(symbol) or {}
+            rows.append({
+                "Ticker": symbol,
+                "Company": info.get("shortName") or info.get("longName") or name,
+                "Exchange": info.get("exchange") or exch,
+                "Market Cap": safe_float(info.get("marketCap"), 0) if "safe_float" in globals() else _num(info.get("marketCap"), default=0),
+                "Quote Type": "EQUITY",
+            })
     except Exception:
         pass
+
     by_symbol = {}
     for row in rows:
         sym = row["Ticker"]
@@ -1187,8 +1255,6 @@ def search_companies_by_keyword(keyword, max_results=12):
             by_symbol[sym] = row
     rows = sorted(by_symbol.values(), key=lambda x: (safe_float(x.get("Market Cap", 0), 0), x.get("Company", "")), reverse=True)
     return rows[:max_results]
-
-
 def _format_market_cap_short(value):
     value = safe_float(value, 0)
     if value >= 1e12:
