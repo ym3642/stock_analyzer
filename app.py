@@ -1,9 +1,3 @@
-"""
-SmartStock — Premium Trading Terminal
-Webull-style charts · Clean legends · No overlaps · Built-in AI thesis
-Run: streamlit run app.py
-"""
-
 import warnings
 warnings.filterwarnings("ignore")
 
